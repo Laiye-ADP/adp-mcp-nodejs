@@ -1,5 +1,11 @@
 import type { Operation } from "./types.js";
-import { customExtractInputSchema, emptyInputSchema, fileInputSchema, taskInputSchema } from "./schema.js";
+import {
+  customExtractInputSchema,
+  emptyInputSchema,
+  fileInputSchema,
+  taskInputSchema,
+  uploadTemporaryFileInputSchema
+} from "./schema.js";
 
 interface PresetTool {
   name: string;
@@ -204,13 +210,29 @@ function createPresetOperation(preset: PresetTool): Operation {
 export const operations: Operation[] = [
   ...presetTools.map(createPresetOperation),
   {
+    name: "upload_temporary_file",
+    title: "上传临时文件",
+    operationId: "uploadTemporaryFile",
+    description:
+      "上传临时文件并返回 file_url。返回的 data.file_url 可以直接作为解析、抽取工具的 file 入参。文件固定按临时策略过期。",
+    method: "POST",
+    path: "/open/agentic_doc_processor/{tenant_name}/files/upload",
+    auth: "adp",
+    bodyMode: "multipart",
+    inputSchema: uploadTemporaryFileInputSchema,
+    annotations: {
+      readOnlyHint: false
+    },
+    usesTenant: true
+  },
+  {
     name: "list_custom_extract_apps",
     title: "列出自定义抽取应用",
     operationId: "listCustomExtractApps",
     description:
       "列出当前用户创建的所有自定义文档抽取应用，返回每个应用的 ID、名称、描述、标签和输出字段定义。可用于查找 execute_custom_extract_app 所需的 app_id。",
     method: "GET",
-    path: "/open/agentic_doc_processor/laiye/v1/app-list?app_type=1&ai_function=1406",
+    path: "/open/agentic_doc_processor/laiye/v1/app-list?app_type=0",
     auth: "adp",
     bodyMode: "none",
     inputSchema: emptyInputSchema,

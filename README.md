@@ -53,6 +53,7 @@ The same parameters apply to any MCP client:
 
 Once connected, your AI client will automatically discover all available ADP tools. Just describe what you need in natural language:
 
+- "Upload this local file and extract fields from the returned URL"
 - "Parse the structure of this PDF"
 - "Extract the information from this ID card"
 - "Pull the amount and date from this invoice"
@@ -65,6 +66,7 @@ Once connected, your AI client will automatically discover all available ADP too
 
 | Tool Name | Title | Description |
 |-----------|-------|-------------|
+| `upload_temporary_file` | Upload Temporary File | Upload `chunk` as a temporary file and return a temporary `file_url`. Pass `data.file_url` to parsing or extraction tools as the `file` parameter. |
 | `parse_document` | General Document Parsing | Parse PDF, image, Word, Excel, PPT and other documents for layout analysis, returning structured text blocks, tables, reading order and page coordinates. Use when the document type is unknown and you need raw structure for further processing; for invoices, ID cards or other specific types, prefer the dedicated extraction tool. |
 
 ### Invoice & Order Extraction
@@ -118,6 +120,15 @@ All out-of-the-box tools share a unified input schema:
 | `wait` | boolean | No | Whether to wait synchronously for the result, default `true` |
 | `timeout_seconds` | integer | No | Synchronous wait timeout in seconds, default `300`, range 1–900 |
 
+### upload_temporary_file
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `chunk` | string | Yes | File to upload. Local file path, `file://` URL, or Base64-encoded content |
+| `ref_id` | string | No | Optional reference ID |
+
+The response contains `data.file_url`, which can be passed directly to parsing or extraction tools as `file`.
+
 ### execute_custom_extract_app
 
 In addition to the parameters above:
@@ -130,10 +141,11 @@ In addition to the parameters above:
 
 No input parameters required.
 
-**File input methods:**
+**Parsing/extraction file input methods:**
 
-- **URL**: pass a link starting with `http://`, `https://`, or `file://` as `file`
+- **URL**: pass a link starting with `http://` or `https://` as `file`
 - **Base64**: pass Base64-encoded file content as `file` (auto-detected when not a URL)
+- **Local files**: call `upload_temporary_file` first, then pass the returned `data.file_url` to the parsing or extraction tool.
 
 **Sync vs Async:**
 

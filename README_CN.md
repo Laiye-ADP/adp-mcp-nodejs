@@ -54,6 +54,7 @@ ADP MCP Server 以 **stdio** 方式运行，客户端通过 `npx` 拉起本地�
 
 连接成功后，AI 客户端会自动发现所有可用的 ADP 工具。直接在对话中描述你的需求即可，例如：
 
+- "先上传这个本地文件，再用返回的 URL 抽取字段"
 - "帮我解析这份 PDF 的结构"
 - "提取这张身份证的信息"
 - "从这张发票里抽取金额和日期"
@@ -66,6 +67,7 @@ ADP MCP Server 以 **stdio** 方式运行，客户端通过 `npx` 拉起本地�
 
 | 工具名 | 标题 | 说明 |
 |--------|------|------|
+| `upload_temporary_file` | 上传临时文件 | 将 `chunk` 上传为临时文件并返回临时 `file_url`。返回的 `data.file_url` 可直接作为解析、抽取工具的 `file` 参数。 |
 | `parse_document` | 通用文档解析 | 对 PDF、图片、Word、Excel、PPT 等文档进行版面解析，返回结构化的文本块、表格、阅读顺序与页面坐标。适用于不确定文档类型、需要先获取原始结构再做后续处理的场景；如已确认是发票、证件等特定类型，请优先使用对应的专用提取工具。 |
 
 ### 票据与订单抽取
@@ -119,6 +121,15 @@ ADP MCP Server 以 **stdio** 方式运行，客户端通过 `npx` 拉起本地�
 | `wait` | boolean | 否 | 是否同步等待结果，默认 `true` |
 | `timeout_seconds` | integer | 否 | 同步等待超时秒数，默认 `300`，范围 1–900 |
 
+### upload_temporary_file
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `chunk` | string | 是 | 上传的文件。本地文件路径、`file://` 地址或 Base64 编码内容 |
+| `ref_id` | string | 否 | 可选引用 ID |
+
+返回结果中包含 `data.file_url`，可直接作为解析或抽取工具的 `file` 参数。
+
 ### execute_custom_extract_app
 
 在上述参数基础上增加：
@@ -133,8 +144,9 @@ ADP MCP Server 以 **stdio** 方式运行，客户端通过 `npx` 拉起本地�
 
 **文件传入方式：**
 
-- **URL**：`file` 传入以 `http://`、`https://`、`file://` 开头的可访问链接
+- **URL**：`file` 传入以 `http://` 或 `https://` 开头的可访问链接
 - **Base64**：`file` 传入 Base64 编码的文件内容（非 URL 格式时自动识别）
+- **本地文件**：先调用 `upload_temporary_file` 上传文件，再将返回的 `data.file_url` 传给解析或抽取工具
 
 **同步 vs 异步：**
 

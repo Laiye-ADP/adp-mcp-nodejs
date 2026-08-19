@@ -61,6 +61,23 @@ export const emptyInputSchema: JsonSchema = {
   additionalProperties: false
 };
 
+export const uploadTemporaryFileInputSchema: JsonSchema = {
+  type: "object",
+  required: ["chunk"],
+  properties: {
+    chunk: {
+      type: "string",
+      description: "上传的文件。本地文件路径、file:// 地址或 Base64 编码"
+    },
+    ref_id: {
+      type: "string",
+      description: "可选引用 ID",
+      default: ""
+    }
+  },
+  additionalProperties: false
+};
+
 export const customExtractInputSchema: JsonSchema = {
   type: "object",
   required: ["app_id", "file"],

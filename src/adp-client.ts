@@ -1,3 +1,6 @@
+import { readFile } from "node:fs/promises";
+import { basename } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { AuthKind, JsonObject, Operation, RequestConfig } from "./types.js";
 
 const DOMESTIC_BASE_URL = "https://adp.laiye.com";
@@ -28,6 +31,10 @@ export async function callAdpOperation(operation: Operation, args: JsonObject): 
   if (operation.bodyMode === "json") {
     headers.set("Content-Type", "application/json");
     return request(url, operation.method, headers, JSON.stringify(pickBody(args, operation)), getTimeoutMs(args));
+  }
+
+  if (operation.bodyMode === "multipart") {
+    return request(url, operation.method, headers, await buildMultipartBody(args), getTimeoutMs(args));
   }
 
   try {
@@ -121,6 +128,38 @@ function shouldUseAsyncPath(operation: Operation, args: JsonObject): operation i
   return Boolean(operation.asyncPath && args.wait === false);
 }
 
+async function buildMultipartBody(args: JsonObject): Promise<FormData> {
+  const chunk = readString(args.chunk);
+  if (!chunk) {
+    throw new Error("chunk is required.");
+  }
+
+  const formData = new FormData();
+  const refId = readString(args.ref_id) ?? "";
+  const upload = await readUploadFile(chunk);
+
+  formData.set("chunk", upload.blob, upload.fileName);
+  formData.set("ref_id", refId);
+  return formData;
+}
+
+async function readUploadFile(file: string): Promise<{ blob: Blob; fileName: string }> {
+  if (isLocalFileInput(file)) {
+    const filePath = toLocalFilePath(file);
+    const bytes = await readFile(filePath);
+    return {
+      blob: new Blob([bytes]),
+      fileName: basename(filePath)
+    };
+  }
+
+  const bytes = Buffer.from(stripDataUrlPrefix(file), "base64");
+  return {
+    blob: new Blob([bytes]),
+    fileName: "chunk"
+  };
+}
+
 async function request(
   url: string,
   method: string,
@@ -179,6 +218,23 @@ function readString(value: unknown): string | undefined {
 
 function isUrl(value: string): boolean {
   return /^https?:\/\//i.test(value);
+}
+
+function isLocalFileInput(value: string): boolean {
+  return (
+    /^file:\/\//i.test(value) ||
+    /^[a-zA-Z]:[\\/]/.test(value) ||
+    value.startsWith("./") ||
+    value.startsWith("../") ||
+    value.startsWith(".\\") ||
+    value.startsWith("..\\") ||
+    value.startsWith("/") ||
+    value.startsWith("\\")
+  );
+}
+
+function toLocalFilePath(value: string): string {
+  return /^file:\/\//i.test(value) ? fileURLToPath(value) : value;
 }
 
 function stripDataUrlPrefix(value: string): string {

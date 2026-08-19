@@ -6,7 +6,7 @@ export type HttpMethod = "GET" | "POST";
 
 export type AuthKind = "adp";
 
-export type BodyMode = "json" | "none";
+export type BodyMode = "json" | "multipart" | "none";
 
 export interface Operation {
   name: string;
