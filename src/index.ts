@@ -25,6 +25,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     title: operation.title,
     description: operation.description,
     inputSchema: operation.inputSchema,
+    outputSchema: operation.outputSchema,
     annotations: operation.annotations,
     _meta: operation.metadata
   }))
@@ -43,6 +44,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   try {
     const result = await callAdpOperation(operation, (request.params.arguments ?? {}) as JsonObject);
     return {
+      structuredContent: toStructuredContent(result),
       content: [{ type: "text", text: JSON.stringify(result, null, 2) }]
     };
   } catch (error) {
@@ -62,3 +64,7 @@ main().catch((error) => {
   console.error(error);
   process.exit(1);
 });
+
+function toStructuredContent(result: unknown): JsonObject | undefined {
+  return result !== null && typeof result === "object" && !Array.isArray(result) ? (result as JsonObject) : undefined;
+}

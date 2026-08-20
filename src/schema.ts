@@ -68,14 +68,60 @@ export const uploadTemporaryFileInputSchema: JsonSchema = {
     chunk: {
       type: "string",
       description: "上传的文件。本地文件路径、file:// 地址或 Base64 编码"
-    },
-    ref_id: {
-      type: "string",
-      description: "可选引用 ID",
-      default: ""
     }
   },
   additionalProperties: false
+};
+
+export const uploadTemporaryFileOutputSchema: JsonSchema = {
+  type: "object",
+  required: ["code", "message", "data"],
+  properties: {
+    code: {
+      type: "string",
+      description: "业务状态码，成功时为 success"
+    },
+    message: {
+      type: "string",
+      description: "返回信息"
+    },
+    tips: {
+      type: ["string", "null"],
+      description: "补充提示信息"
+    },
+    data: {
+      type: "object",
+      required: ["id", "file_name", "file_size", "content_type", "download_url"],
+      properties: {
+        id: {
+          type: "string",
+          description: "文件 ID"
+        },
+        file_name: {
+          type: "string",
+          description: "文件名"
+        },
+        file_size: {
+          type: "integer",
+          description: "文件大小，单位字节"
+        },
+        content_type: {
+          type: "string",
+          description: "文件 MIME 类型"
+        },
+        download_url: {
+          type: "string",
+          description: "文件下载 URL，可直接传给解析/抽取工具的 file 参数"
+        },
+        status: {
+          type: "string",
+          description: "文件状态"
+        }
+      },
+      additionalProperties: true
+    }
+  },
+  additionalProperties: true
 };
 
 export const customExtractInputSchema: JsonSchema = {

@@ -20,6 +20,7 @@ export interface Operation {
   auth: AuthKind;
   bodyMode: BodyMode;
   inputSchema: JsonSchema;
+  outputSchema?: JsonSchema;
   annotations?: JsonObject;
   metadata?: JsonObject;
   appId?: string;

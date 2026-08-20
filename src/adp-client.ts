@@ -135,11 +135,9 @@ async function buildMultipartBody(args: JsonObject): Promise<FormData> {
   }
 
   const formData = new FormData();
-  const refId = readString(args.ref_id) ?? "";
   const upload = await readUploadFile(chunk);
 
   formData.set("chunk", upload.blob, upload.fileName);
-  formData.set("ref_id", refId);
   return formData;
 }
 

@@ -66,7 +66,7 @@ Once connected, your AI client will automatically discover all available ADP too
 
 | Tool Name | Title | Description |
 |-----------|-------|-------------|
-| `upload_temporary_file` | Upload Temporary File | Upload `chunk` as a temporary file and return a temporary `file_url`. Pass `data.file_url` to parsing or extraction tools as the `file` parameter. |
+| `upload_temporary_file` | Upload Temporary File | Upload `chunk` and return `download_url`. Pass `data.download_url` to parsing or extraction tools as the `file` parameter. |
 | `parse_document` | General Document Parsing | Parse PDF, image, Word, Excel, PPT and other documents for layout analysis, returning structured text blocks, tables, reading order and page coordinates. Use when the document type is unknown and you need raw structure for further processing; for invoices, ID cards or other specific types, prefer the dedicated extraction tool. |
 
 ### Invoice & Order Extraction
@@ -125,9 +125,8 @@ All out-of-the-box tools share a unified input schema:
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `chunk` | string | Yes | File to upload. Local file path, `file://` URL, or Base64-encoded content |
-| `ref_id` | string | No | Optional reference ID |
 
-The response contains `data.file_url`, which can be passed directly to parsing or extraction tools as `file`.
+The response contains `data.download_url`, which can be passed directly to parsing or extraction tools as `file`.
 
 ### execute_custom_extract_app
 
@@ -145,7 +144,7 @@ No input parameters required.
 
 - **URL**: pass a link starting with `http://` or `https://` as `file`
 - **Base64**: pass Base64-encoded file content as `file` (auto-detected when not a URL)
-- **Local files**: call `upload_temporary_file` first, then pass the returned `data.file_url` to the parsing or extraction tool.
+- **Local files**: call `upload_temporary_file` first, then pass the returned `data.download_url` to the parsing or extraction tool.
 
 **Sync vs Async:**
 
@@ -155,6 +154,36 @@ No input parameters required.
 ---
 
 ## Tool Output
+
+### upload_temporary_file Output
+
+```json
+{
+  "code": "success",
+  "message": "",
+  "tips": null,
+  "data": {
+    "id": "ade6dcfd9b9c11f1be34d85ed35661fd",
+    "file_name": "invoice.pdf",
+    "file_size": 123,
+    "content_type": "application/pdf",
+    "download_url": "https://adp.laiye.com/web/agentic_doc_processor/laiye/file/ade6dcfd9b9c11f1be34d85ed35661fd",
+    "status": "success"
+  }
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `code` | string | Business status code. Success is usually `success` |
+| `message` | string | Response message |
+| `tips` | string \| null | Additional message |
+| `data.id` | string | File ID |
+| `data.file_name` | string | File name |
+| `data.file_size` | integer | File size in bytes |
+| `data.content_type` | string | MIME type |
+| `data.download_url` | string | Download URL. Pass this value to parsing or extraction tools as `file` |
+| `data.status` | string | File status, returned when available |
 
 ### parse_document Output
 

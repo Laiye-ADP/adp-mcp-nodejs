@@ -4,7 +4,8 @@ import {
   emptyInputSchema,
   fileInputSchema,
   taskInputSchema,
-  uploadTemporaryFileInputSchema
+  uploadTemporaryFileInputSchema,
+  uploadTemporaryFileOutputSchema
 } from "./schema.js";
 
 interface PresetTool {
@@ -214,16 +215,16 @@ export const operations: Operation[] = [
     title: "上传临时文件",
     operationId: "uploadTemporaryFile",
     description:
-      "上传临时文件并返回 file_url。返回的 data.file_url 可以直接作为解析、抽取工具的 file 入参。文件固定按临时策略过期。",
+      "上传文件并返回 download_url。返回的 data.download_url 可以直接作为解析、抽取工具的 file 入参。",
     method: "POST",
-    path: "/open/agentic_doc_processor/{tenant_name}/files/upload",
+    path: "/open/agentic_engine/laiye/files/upload",
     auth: "adp",
     bodyMode: "multipart",
     inputSchema: uploadTemporaryFileInputSchema,
+    outputSchema: uploadTemporaryFileOutputSchema,
     annotations: {
       readOnlyHint: false
-    },
-    usesTenant: true
+    }
   },
   {
     name: "list_custom_extract_apps",

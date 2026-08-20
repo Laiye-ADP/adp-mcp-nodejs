@@ -67,7 +67,7 @@ ADP MCP Server 以 **stdio** 方式运行，客户端通过 `npx` 拉起本地�
 
 | 工具名 | 标题 | 说明 |
 |--------|------|------|
-| `upload_temporary_file` | 上传临时文件 | 将 `chunk` 上传为临时文件并返回临时 `file_url`。返回的 `data.file_url` 可直接作为解析、抽取工具的 `file` 参数。 |
+| `upload_temporary_file` | 上传临时文件 | 上传 `chunk` 并返回 `download_url`。返回的 `data.download_url` 可直接作为解析、抽取工具的 `file` 参数。 |
 | `parse_document` | 通用文档解析 | 对 PDF、图片、Word、Excel、PPT 等文档进行版面解析，返回结构化的文本块、表格、阅读顺序与页面坐标。适用于不确定文档类型、需要先获取原始结构再做后续处理的场景；如已确认是发票、证件等特定类型，请优先使用对应的专用提取工具。 |
 
 ### 票据与订单抽取
@@ -126,9 +126,8 @@ ADP MCP Server 以 **stdio** 方式运行，客户端通过 `npx` 拉起本地�
 | 参数 | 类型 | 必填 | 说明 |
 |------|------|------|------|
 | `chunk` | string | 是 | 上传的文件。本地文件路径、`file://` 地址或 Base64 编码内容 |
-| `ref_id` | string | 否 | 可选引用 ID |
 
-返回结果中包含 `data.file_url`，可直接作为解析或抽取工具的 `file` 参数。
+返回结果中包含 `data.download_url`，可直接作为解析或抽取工具的 `file` 参数。
 
 ### execute_custom_extract_app
 
@@ -146,7 +145,7 @@ ADP MCP Server 以 **stdio** 方式运行，客户端通过 `npx` 拉起本地�
 
 - **URL**：`file` 传入以 `http://` 或 `https://` 开头的可访问链接
 - **Base64**：`file` 传入 Base64 编码的文件内容（非 URL 格式时自动识别）
-- **本地文件**：先调用 `upload_temporary_file` 上传文件，再将返回的 `data.file_url` 传给解析或抽取工具
+- **本地文件**：先调用 `upload_temporary_file` 上传文件，再将返回的 `data.download_url` 传给解析或抽取工具
 
 **同步 vs 异步：**
 
@@ -156,6 +155,36 @@ ADP MCP Server 以 **stdio** 方式运行，客户端通过 `npx` 拉起本地�
 ---
 
 ## 工具输出
+
+### upload_temporary_file 输出
+
+```json
+{
+  "code": "success",
+  "message": "",
+  "tips": null,
+  "data": {
+    "id": "ade6dcfd9b9c11f1be34d85ed35661fd",
+    "file_name": "invoice.pdf",
+    "file_size": 123,
+    "content_type": "application/pdf",
+    "download_url": "https://adp.laiye.com/web/agentic_doc_processor/laiye/file/ade6dcfd9b9c11f1be34d85ed35661fd",
+    "status": "success"
+  }
+}
+```
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `code` | string | 业务状态码，成功通常为 `success` |
+| `message` | string | 返回信息 |
+| `tips` | string \| null | 补充提示信息 |
+| `data.id` | string | 文件 ID |
+| `data.file_name` | string | 文件名 |
+| `data.file_size` | integer | 文件大小，单位字节 |
+| `data.content_type` | string | MIME 类型 |
+| `data.download_url` | string | 下载 URL，可直接作为解析或抽取工具的 `file` 参数 |
+| `data.status` | string | 文件状态，有返回时提供 |
 
 ### parse_document 输出
 
