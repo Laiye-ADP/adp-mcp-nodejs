@@ -111,7 +111,7 @@ ADP MCP Server 以 **stdio** 方式运行，客户端通过 `npx` 拉起本地�
 
 ### 文档解析与 OOTB 抽取工具
 
-所有开箱即用工具共享统一的输入 Schema：
+开箱即用工具通用输入参数：
 
 | 参数 | 类型 | 必填 | 说明 |
 |------|------|------|------|
@@ -120,6 +120,12 @@ ADP MCP Server 以 **stdio** 方式运行，客户端通过 `npx` 拉起本地�
 | `with_rec_result` | boolean | 否 | 是否包含 OCR 中间结果，默认 `true` |
 | `wait` | boolean | 否 | 是否同步等待结果，默认 `true` |
 | `timeout_seconds` | integer | 否 | 同步等待超时秒数，默认 `300`，范围 1–900 |
+
+`extract_china_invoice` 额外支持：
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `enable_invoice_verify` | boolean | 否 | 是否开启发票验真，默认 `false` |
 
 ### upload_temporary_file
 

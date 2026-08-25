@@ -1,37 +1,53 @@
 import type { JsonSchema } from "./types.js";
 
+const documentFileProperties = {
+  file: {
+    type: "string",
+    description: "文件 URL 或 Base64 编码"
+  },
+  file_name: {
+    type: "string",
+    description: "文件名（可选，含扩展名）"
+  },
+  with_rec_result: {
+    type: "boolean",
+    description: "是否包含 OCR 中间结果",
+    default: true
+  },
+  wait: {
+    type: "boolean",
+    description: "是否同步等待结果，默认 true",
+    default: true
+  },
+  timeout_seconds: {
+    type: "integer",
+    description: "同步等待超时秒数，默认 300",
+    default: 300
+  },
+  accept_language: {
+    type: "string",
+    enum: ["zh", "en"],
+    description: "返回语言和接口区域。默认 zh，访问 https://adp.laiye.com；传 en 时访问 https://adp-global.laiye.com。",
+    default: "zh"
+  }
+};
+
 export const fileInputSchema: JsonSchema = {
   type: "object",
   required: ["file"],
+  properties: documentFileProperties,
+  additionalProperties: false
+};
+
+export const chinaInvoiceInputSchema: JsonSchema = {
+  type: "object",
+  required: ["file"],
   properties: {
-    file: {
-      type: "string",
-      description: "文件 URL 或 Base64 编码"
-    },
-    file_name: {
-      type: "string",
-      description: "文件名（可选，含扩展名）"
-    },
-    with_rec_result: {
+    ...documentFileProperties,
+    enable_invoice_verify: {
       type: "boolean",
-      description: "是否包含 OCR 中间结果",
-      default: true
-    },
-    wait: {
-      type: "boolean",
-      description: "是否同步等待结果，默认 true",
-      default: true
-    },
-    timeout_seconds: {
-      type: "integer",
-      description: "同步等待超时秒数，默认 300",
-      default: 300
-    },
-    accept_language: {
-      type: "string",
-      enum: ["zh", "en"],
-      description: "返回语言和接口区域。默认 zh，访问 https://adp.laiye.com；传 en 时访问 https://adp-global.laiye.com。",
-      default: "zh"
+      description: "是否开启发票验真，默认 false。仅适用于中国票据工具。",
+      default: false
     }
   },
   additionalProperties: false

@@ -110,7 +110,7 @@ In addition to the out-of-the-box tools above, MCP provides two fixed tools for 
 
 ### Document Parsing & OOTB Extraction Tools
 
-All out-of-the-box tools share a unified input schema:
+Common input parameters for out-of-the-box tools:
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -119,6 +119,12 @@ All out-of-the-box tools share a unified input schema:
 | `with_rec_result` | boolean | No | Whether to include OCR intermediate results, default `true` |
 | `wait` | boolean | No | Whether to wait synchronously for the result, default `true` |
 | `timeout_seconds` | integer | No | Synchronous wait timeout in seconds, default `300`, range 1–900 |
+
+`extract_china_invoice` additionally supports:
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `enable_invoice_verify` | boolean | No | Whether to enable invoice authenticity verification, default `false` |
 
 ### upload_temporary_file
 

@@ -1,5 +1,6 @@
 import type { Operation } from "./types.js";
 import {
+  chinaInvoiceInputSchema,
   customExtractInputSchema,
   emptyInputSchema,
   fileInputSchema,
@@ -15,6 +16,8 @@ interface PresetTool {
   appId: string;
   labels: string[];
   mode: "extract" | "recognize";
+  inputSchema?: Operation["inputSchema"];
+  bodyFields?: string[];
 }
 
 const presetTools: PresetTool[] = [
@@ -25,7 +28,9 @@ const presetTools: PresetTool[] = [
       "覆盖中国地区 30+ 种常见票据：支持全电发票、普通发票、专用发票、出租车票、火车票、飞机行程单、财政发票等财务场景常见票据。可从票据中提取发票号码、开票日期、金额、购买方、销售方等关键信息，以及支持判断发票真假。",
     appId: "ootb_v9x2y5z8a1b4c7d0e3f6h9j1k4m7",
     labels: ["国内通用多票据", "多票据识别", "财务报销", "全票种识别", "发票组件", "发票验真"],
-    mode: "extract"
+    mode: "extract",
+    inputSchema: chinaInvoiceInputSchema,
+    bodyFields: ["enable_invoice_verify"]
   },
   {
     name: "extract_vehicle_cert",
@@ -190,7 +195,7 @@ function createPresetOperation(preset: PresetTool): Operation {
       : "/open/agentic_doc_processor/{tenant_name}/v1/app/doc/extract/create/task",
     auth: "adp",
     bodyMode: "json",
-    inputSchema: fileInputSchema,
+    inputSchema: preset.inputSchema ?? fileInputSchema,
     annotations: {
       title: preset.title,
       readOnlyHint: false,
@@ -203,6 +208,7 @@ function createPresetOperation(preset: PresetTool): Operation {
     },
     appId: preset.appId,
     mode: preset.mode,
+    bodyFields: preset.bodyFields,
     usesTenant: true,
     usesAcceptLanguage: true
   };

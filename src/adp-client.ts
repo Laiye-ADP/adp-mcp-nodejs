@@ -121,6 +121,12 @@ function pickBody(args: JsonObject, operation: Operation): JsonObject {
     body.with_rec_result = typeof args.with_rec_result === "boolean" ? args.with_rec_result : true;
   }
 
+  for (const field of operation.bodyFields ?? []) {
+    if (args[field] !== undefined) {
+      body[field] = args[field];
+    }
+  }
+
   return body;
 }
 
