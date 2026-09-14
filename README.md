@@ -30,7 +30,8 @@ The ADP MCP Server runs over **stdio** transport: the client launches a local pr
       "command": "npx",
       "args": ["-y", "@laiye-adp/mcp"],
       "env": {
-        "ADP_API_KEY": "<YOUR-ADP-API-Key>"
+        "ADP_API_KEY": "<YOUR-ADP-API-Key>",
+        "API_SOURCE": "npm-mcp"
       }
     }
   }
@@ -45,8 +46,10 @@ The same parameters apply to any MCP client:
 | **Args** | `["-y", "@laiye-adp/mcp"]` |
 | **Transport** | stdio |
 | **Authentication** | Environment variable `ADP_API_KEY=<YOUR-ADP-API-Key>` |
+| **Source marker** | Optional environment variable `API_SOURCE`, default `npm-mcp` |
 
 > The optional environment variable `ADP_ACCEPT_LANGUAGE` (`zh` / `en`, default `zh`) switches the API language and domain.
+> The optional environment variable `API_SOURCE` sets the OpenAPI request header `X-Api-Source`; the default is `npm-mcp`.
 > Requires Node.js 20+ installed locally.
 
 ### 3. Start Using
@@ -352,13 +355,15 @@ ADP MCP Server uses API Key authentication, passed via the `ADP_API_KEY` environ
 
 ```json
 "env": {
-  "ADP_API_KEY": "<YOUR-ADP-API-Key>"
+  "ADP_API_KEY": "<YOUR-ADP-API-Key>",
+  "API_SOURCE": "npm-mcp"
 }
 ```
 
 - API Key is available from the **My MCP** page in the ADP console
 - Each API Key is bound to a single user and can only access that user's apps and data
 - The API Key is passed only as an environment variable to the local process and never appears in request bodies or responses
+- `API_SOURCE` is sent to OpenAPI as the `X-Api-Source` request header; when omitted it defaults to `npm-mcp`
 
 ---
 

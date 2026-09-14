@@ -7,6 +7,7 @@ const DOMESTIC_BASE_URL = "https://adp.laiye.com";
 const GLOBAL_BASE_URL = "https://adp-global.laiye.com";
 const DEFAULT_TENANT_NAME = "laiye";
 const DEFAULT_ACCEPT_LANGUAGE = "zh";
+const DEFAULT_API_SOURCE = "npm-mcp";
 
 export function resolveConfig(args: JsonObject): RequestConfig {
   const acceptLanguage = readString(args.accept_language) ?? process.env.ADP_ACCEPT_LANGUAGE ?? DEFAULT_ACCEPT_LANGUAGE;
@@ -14,6 +15,7 @@ export function resolveConfig(args: JsonObject): RequestConfig {
   return {
     baseUrl: selectBaseUrl(acceptLanguage),
     apiKey: process.env.ADP_API_KEY,
+    apiSource: readString(process.env.API_SOURCE) ?? DEFAULT_API_SOURCE,
     tenantName: DEFAULT_TENANT_NAME,
     acceptLanguage
   };
@@ -57,7 +59,7 @@ function buildHeaders(_auth: AuthKind, config: RequestConfig): Headers {
   }
 
   headers.set("X-API-KEY", config.apiKey);
-  headers.set("X-Api-Source", "npm-mcp");
+  headers.set("X-Api-Source", config.apiSource);
   return headers;
 }
 

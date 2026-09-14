@@ -31,7 +31,8 @@ ADP MCP Server 以 **stdio** 方式运行，客户端通过 `npx` 拉起本地�
       "command": "npx",
       "args": ["-y", "@laiye-adp/mcp"],
       "env": {
-        "ADP_API_KEY": "<YOUR-ADP-API-Key>"
+        "ADP_API_KEY": "<YOUR-ADP-API-Key>",
+        "API_SOURCE": "npm-mcp"
       }
     }
   }
@@ -46,8 +47,10 @@ ADP MCP Server 以 **stdio** 方式运行，客户端通过 `npx` 拉起本地�
 | **Args** | `["-y", "@laiye-adp/mcp"]` |
 | **Transport** | stdio |
 | **认证方式** | 环境变量 `ADP_API_KEY=<YOUR-ADP-API-Key>` |
+| **来源标识** | 可选环境变量 `API_SOURCE`，默认 `npm-mcp` |
 
 > 可选环境变量 `ADP_ACCEPT_LANGUAGE`（`zh` / `en`，默认 `zh`）用于切换接口语言与域名。
+> 可选环境变量 `API_SOURCE` 用于设置 OpenAPI 请求头 `X-Api-Source`，默认 `npm-mcp`。
 > 要求本地已安装 Node.js 20+。
 
 ### 3. 开始使用
@@ -353,13 +356,15 @@ ADP MCP Server 使用 API Key 认证，通过环境变量 `ADP_API_KEY` 传入�
 
 ```json
 "env": {
-  "ADP_API_KEY": "<YOUR-ADP-API-Key>"
+  "ADP_API_KEY": "<YOUR-ADP-API-Key>",
+  "API_SOURCE": "npm-mcp"
 }
 ```
 
 - API Key 可在 ADP 控制台「我的MCP」页面获取
 - 每个 API Key 绑定一个用户，仅可访问该用户下的应用与数据
 - API Key 仅以环境变量形式传入本地进程，不会出现在请求体或响应中
+- `API_SOURCE` 会作为 `X-Api-Source` 请求头传给 OpenAPI；未配置时默认使用 `npm-mcp`
 
 ---
 

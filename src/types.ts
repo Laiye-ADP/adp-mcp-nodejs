@@ -35,6 +35,7 @@ export interface Operation {
 export interface RequestConfig {
   baseUrl: string;
   apiKey: string | undefined;
+  apiSource: string;
   tenantName: string;
   acceptLanguage: string;
 }
