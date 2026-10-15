@@ -127,7 +127,14 @@ Common input parameters for out-of-the-box tools:
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `enable_invoice_verify` | boolean | No | Whether to enable invoice authenticity verification, default `false` |
+| `enable_invoice_verify` | boolean or null | No | Enable (`true`) or disable (`false`) verification for this extraction only. Omission or `null` uses the saved app configuration without changing it. |
+
+`extract_global_invoice`, `extract_global_invoice_fast`, and `extract_sea_invoice_fast` additionally support:
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `enable_multi_ticket` | boolean | No | Split multiple invoices in one file into separate results, default `true`. Applies only to international and Southeast Asia fast modes without changing app configuration. |
+| `enable_field_value_translation` | boolean or null | No | Enable (`true`) or disable (`false`) field-value translation for this extraction only. Omission or `null` uses the saved app configuration without changing it. The target language follows `accept_language` or `ADP_ACCEPT_LANGUAGE`. |
 
 ### upload_temporary_file
 
@@ -342,7 +349,7 @@ No input parameters required.
 | Format | Extensions | Notes |
 |--------|------------|-------|
 | PDF | `.pdf` | Supports both scanned and electronic |
-| Image | `.jpg` `.jpeg` `.png` `.bmp` `.tiff` `.webp` | Supports camera photos |
+| Image | `.jpg` `.jpeg` `.png` `.bmp` `.tiff` | Supports camera photos |
 | Word | `.doc` `.docx` | - |
 | Excel | `.xls` `.xlsx` | - |
 | PPT | `.ppt` `.pptx` | - |

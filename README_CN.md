@@ -128,7 +128,14 @@ ADP MCP Server 以 **stdio** 方式运行，客户端通过 `npx` 拉起本地�
 
 | 参数 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| `enable_invoice_verify` | boolean | 否 | 是否开启发票验真，默认 `false` |
+| `enable_invoice_verify` | boolean 或 null | 否 | 仅为本次抽取开启（`true`）或关闭（`false`）验真；不传或 `null` 使用应用已保存配置，不修改应用配置 |
+
+`extract_global_invoice`、`extract_global_invoice_fast`、`extract_sea_invoice_fast` 额外支持：
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `enable_multi_ticket` | boolean | 否 | 是否将同一文件中的多张票据拆分为独立结果，默认 `true`；仅国际高速版和东南亚高速版生效，不修改应用配置 |
+| `enable_field_value_translation` | boolean 或 null | 否 | 仅为本次抽取开启（`true`）或关闭（`false`）字段值翻译；不传或 `null` 使用应用已保存配置，不修改应用配置；目标语言由 `accept_language` 或 `ADP_ACCEPT_LANGUAGE` 决定 |
 
 ### upload_temporary_file
 
@@ -343,7 +350,7 @@ ADP MCP Server 以 **stdio** 方式运行，客户端通过 `npx` 拉起本地�
 | 格式 | 扩展名 | 说明 |
 |------|--------|------|
 | PDF | `.pdf` | 支持扫描件与电子版 |
-| 图片 | `.jpg` `.jpeg` `.png` `.bmp` `.tiff` `.webp` | 支持手机拍摄件 |
+| 图片 | `.jpg` `.jpeg` `.png` `.bmp` `.tiff` | 支持手机拍摄件 |
 | Word | `.doc` `.docx` | - |
 | Excel | `.xls` `.xlsx` | - |
 | PPT | `.ppt` `.pptx` | - |

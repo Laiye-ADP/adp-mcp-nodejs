@@ -4,6 +4,7 @@ import {
   customExtractInputSchema,
   emptyInputSchema,
   fileInputSchema,
+  overseasInvoiceInputSchema,
   taskInputSchema,
   uploadTemporaryFileInputSchema,
   uploadTemporaryFileOutputSchema
@@ -156,7 +157,9 @@ const presetTools: PresetTool[] = [
       "从 PDF 或图片格式的海外发票、收据、票据中提取关键字段（发票号、开票日期、金额、税额、币种、明细行等）。适用于跨境贸易、报销、应付账款自动化等场景；中国大陆增值税发票请使用专门的国内发票工具。",
     appId: "ootb_a3f8h1j5k9n2p7q4w6x0y3b5c8d1",
     labels: ["发票", "收据"],
-    mode: "extract"
+    mode: "extract",
+    inputSchema: overseasInvoiceInputSchema,
+    bodyFields: ["enable_multi_ticket", "enable_field_value_translation"]
   },
   {
     name: "extract_global_invoice_fast",
@@ -165,7 +168,9 @@ const presetTools: PresetTool[] = [
       "从 PDF 或图片格式的海外发票、收据中高速提取关键字段（发票号、开票日期、金额、税额、币种、明细行等）。跳过 OCR 阶段，直接使用 VLM 提取，速度更快；适用于对延迟敏感的批量处理场景；中国大陆增值税发票请使用国内票据工具。",
     appId: "ootb_r3s6t9u2v5w8x1y4z7a0b3c6d9e2",
     labels: ["发票", "收据", "全球发票", "高准确度", "高速抽取"],
-    mode: "extract"
+    mode: "extract",
+    inputSchema: overseasInvoiceInputSchema,
+    bodyFields: ["enable_multi_ticket", "enable_field_value_translation"]
   },
   {
     name: "extract_sea_invoice_fast",
@@ -174,7 +179,9 @@ const presetTools: PresetTool[] = [
       "从 PDF 或图片格式的东南亚地区发票、收据中高速提取关键字段，支持 WHT（预扣税）等东南亚特有字段。跳过 OCR 阶段，直接使用 VLM 提取；适用于泰国、越南、印尼等东南亚国家的发票处理场景。",
     appId: "ootb_u2v5w8x1y4z7a0b3c6d9e2f5g8",
     labels: ["发票", "收据", "票据", "东南亚发票", "高准确度", "高速抽取"],
-    mode: "extract"
+    mode: "extract",
+    inputSchema: overseasInvoiceInputSchema,
+    bodyFields: ["enable_multi_ticket", "enable_field_value_translation"]
   }
 ];
 

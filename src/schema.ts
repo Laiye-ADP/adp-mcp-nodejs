@@ -39,15 +39,32 @@ export const fileInputSchema: JsonSchema = {
   additionalProperties: false
 };
 
+export const overseasInvoiceInputSchema: JsonSchema = {
+  type: "object",
+  required: ["file"],
+  properties: {
+    ...documentFileProperties,
+    enable_multi_ticket: {
+      type: "boolean",
+      description: "是否将同一文件中的多张票据拆分为独立结果。仅国际高速版和东南亚高速版生效；默认 true，仅影响本次调用，不修改应用配置。",
+      default: true
+    },
+    enable_field_value_translation: {
+      type: ["boolean", "null"],
+      description: "是否仅为本次调用开启字段值翻译。不传或 null 时使用应用已保存配置，不修改应用配置。目标语言由 accept_language 参数或 ADP_ACCEPT_LANGUAGE 环境变量决定。"
+    }
+  },
+  additionalProperties: false
+};
+
 export const chinaInvoiceInputSchema: JsonSchema = {
   type: "object",
   required: ["file"],
   properties: {
     ...documentFileProperties,
     enable_invoice_verify: {
-      type: "boolean",
-      description: "是否开启发票验真，默认 false。仅适用于中国票据工具。",
-      default: false
+      type: ["boolean", "null"],
+      description: "是否为本次国内通用票据抽取开启发票验真。true 开启、false 关闭；不传或 null 使用应用已保存配置，不修改应用配置。"
     }
   },
   additionalProperties: false
