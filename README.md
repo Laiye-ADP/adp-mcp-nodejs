@@ -1,7 +1,7 @@
 
 ## About ADP MCP Server
 
-ADP MCP Server is the Model Context Protocol endpoint for Laiye's **Agentic Document Processing (ADP)** platform. It lets any MCP-compatible AI client — Claude Desktop, Cursor, Copilot Chat, Tongyi Lingma, Coze, and others — invoke ADP's document parsing and extraction capabilities without writing a single line of code.Unlike the CLI, the MCP Server runs over **Streamable HTTP** transport. A single connection is all you need to discover available tools, invoke processing, and query results — entirely within your chat window.
+ADP MCP Server connects MCP-compatible AI clients to Laiye's **Agentic Document Processing (ADP)** platform for document parsing, extraction and workflow applications. This Node.js package runs locally over **stdio**, letting clients discover tools, process documents and query results from the conversation.
 
 ADP integrates Vision-Language Models (VLM), Large Language Models (LLM) and autonomous agent decision-making technologies. It reshapes traditional document processing by transforming conventional rule-based field extraction into goal-driven end-to-end intelligent automation. Focused on intelligent processing of business documents, ADP automatically classifies overseas invoices, domestic vouchers, procurement contracts, logistics documents, financial statements and trading contracts, and accurately extracts key fields. It also supports table parsing, content verification and multilingual recognition. Requiring no template setup, data labeling or ongoing rule maintenance, it efficiently handles high-volume document processing tasks.
 
@@ -109,6 +109,53 @@ In addition to the out-of-the-box tools above, MCP provides two fixed tools for 
 
 ---
 
+### Workflow Applications
+
+| Tool Name | Description |
+|-----------|-------------|
+| `list_workflow_templates` | Query official templates by name with `search`, `offset` and `size`. Catalog IDs are for discovery. |
+| `create_workflow_application_from_template` | Create and publish an account application, or reuse the corresponding runnable application. |
+| `upload_temporary_file` | For workflow files, pass the created `application_id` and `sharing_scope="application"`. |
+| `execute_workflow_app` | Run a published account application, synchronously by default; use `wait=false` for an explicitly requested async run. |
+| `query_workflow_run` | Query a workflow by `run_id`, preserving its complete `output` and `error`. |
+
+Supported template keys:
+
+| Template | `template_key` |
+|----------|----------------|
+| Accounts payable | `finance_payable` |
+| Expense reimbursement | `expense_reimbursement` |
+| Financial report extraction | `financial_report_extraction` |
+
+Use the matching template to **create and publish an application first**, then upload and run using the returned account `application_id`. Creation does not require `can_run=true` in the template catalog. Repeated creation reuses an existing runnable application and preserves its template version. Do not run using the catalog's `application_id`.
+
+Call `create_workflow_application_from_template`:
+
+```json
+{"template_key":"financial_report_extraction"}
+```
+
+Successful `data` contains `template_key`, `template_version`, `application_id`, `application_name`, `release_version_id`, `application_status="published"` and `can_run=true`. Save the returned IDs. Then call `upload_temporary_file`:
+
+```json
+{"chunk":"/path/to/report.pdf","application_id":"<created application_id>","sharing_scope":"application"}
+```
+
+Call `execute_workflow_app` using the upload response's `download_url`, `file_name`, `content_type` and optional `file_size`:
+
+```json
+{
+  "application_id":"<created application_id>",
+  "files":[{"url":"https://files.example.com/report.pdf","name":"report.pdf","mime_type":"application/pdf"}]
+}
+```
+
+For async runs, add `"wait":false`, save `data.run_id`, and call `query_workflow_run` with `{"run_id":"<returned run_id>"}`. A run is successful only when `status="succeeded"`; also inspect the output against the user's request. Do not use document `task_id` query tools for workflow runs. If a creation, upload or run response is uncertain, do not automatically resubmit.
+
+Workflow changes currently require the ADP website interface. Test and republish there before running the application through the API again. These tools support creating an application from an official template; custom workflow creation and workflow editing remain website operations.
+
+The workflow tools accept `accept_language` and `timeout_seconds`. Use the same account region for creation, upload, execution and query: `zh` selects the China service and `en` selects the global service, or configure `ADP_ACCEPT_LANGUAGE` consistently.
+
 ## Tool Input Parameters
 
 ### Document Parsing & OOTB Extraction Tools
@@ -141,6 +188,10 @@ Common input parameters for out-of-the-box tools:
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `chunk` | string | Yes | File to upload. Local file path, `file://` URL, or Base64-encoded content |
+| `application_id` | string | No | Created account workflow application ID; required when `sharing_scope="application"` |
+| `sharing_scope` | string | No | `application` for workflow files, or `user` for temporary document files |
+| `accept_language` | string | No | Account region and response language, `zh` or `en` |
+| `timeout_seconds` | integer | No | Request timeout in seconds, default 300, range 1–900 |
 
 The response contains `data.download_url`, which can be passed directly to parsing or extraction tools as `file`.
 

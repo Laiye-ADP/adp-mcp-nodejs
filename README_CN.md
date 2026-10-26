@@ -1,7 +1,7 @@
 
 ## 关于 ADP MCP Server
 
-ADP MCP Server 是来也科技**智能体文档处理产品 (Agentic Document Processing，简称 ADP)** 的 Model Context Protocol 服务端，让任何支持 MCP 协议的 AI 客户端（Claude Desktop、Cursor、Copilot Chat、通义灵码、Coze 等）无需编写代码即可调用 ADP 的文档解析与抽取能力。与 CLI 工具不同，MCP Server 以 **Streamable HTTP** 传输运行，一条连接即可发现所有可用工具、调用处理、查询结果——完全在对话窗口内完成。
+ADP MCP Server 将支持 MCP 协议的 AI 客户端连接到来也**智能体文档处理产品（Agentic Document Processing，简称 ADP）**，提供文档解析、抽取和工作流应用能力。本 Node.js 包在本地通过 **stdio** 运行，客户端可在对话中发现工具、处理文档并查询结果。
 
 ADP 产品深度融合视觉语言模型（VLM）、大语言模型（LLM）与智能体自主决策技术，彻底颠覆传统文档处理模式，将行业沿用多年的规则驱动的机械字段抽取，全面升级为目标驱动的全流程智能自动化。产品专注于各类业务单据智能化处理，可对海外发票、国内票据、采购合同、物流单据、金融报表、交易合同等文件自动分类并精准抽取关键字段，同时支持表格解析、内容核验与多语种识别，无需人工搭建模板、标注数据和维护规则，高效完成大批量文档处理工作。
 
@@ -110,6 +110,53 @@ ADP MCP Server 以 **stdio** 方式运行，客户端通过 `npx` 拉起本地�
 
 ---
 
+### 工作流应用
+
+| 工具名 | 说明 |
+|--------|------|
+| `list_workflow_templates` | 按模板名称查询官方模板，支持 `search`、`offset`、`size`；目录 ID 仅用于发现。 |
+| `create_workflow_application_from_template` | 从模板创建并发布当前账号的应用，已有对应可运行应用时复用。 |
+| `upload_temporary_file` | 工作流文件传入创建响应中的 `application_id` 和 `sharing_scope="application"`。 |
+| `execute_workflow_app` | 运行已发布的账号应用，默认同步；用户明确要求异步时传 `wait=false`。 |
+| `query_workflow_run` | 用 `run_id` 查询工作流，保留完整 `output` 和 `error`。 |
+
+支持的模板键：
+
+| 模板 | `template_key` |
+|------|----------------|
+| 财务应付 | `finance_payable` |
+| 费用报销 | `expense_reimbursement` |
+| 金融财报 | `financial_report_extraction` |
+
+选择与用户目标匹配的模板，**先创建并发布应用**，再使用返回的账号 `application_id` 上传文件和运行。创建不要求模板目录预先 `can_run=true`；重复创建会复用已有可运行应用，并保留其实际模板版本。不要使用模板目录中的 `application_id` 运行。
+
+调用 `create_workflow_application_from_template`：
+
+```json
+{"template_key":"financial_report_extraction"}
+```
+
+成功响应的 `data` 包含 `template_key`、`template_version`、`application_id`、`application_name`、`release_version_id`、`application_status="published"` 和 `can_run=true`。保存返回的 ID，再调用 `upload_temporary_file`：
+
+```json
+{"chunk":"/path/to/report.pdf","application_id":"<创建返回的 application_id>","sharing_scope":"application"}
+```
+
+使用上传响应中的 `download_url`、`file_name`、`content_type` 和可选的 `file_size`，调用 `execute_workflow_app`：
+
+```json
+{
+  "application_id":"<创建返回的 application_id>",
+  "files":[{"url":"https://files.example.com/report.pdf","name":"report.pdf","mime_type":"application/pdf"}]
+}
+```
+
+异步运行加 `"wait":false`，保存 `data.run_id`，再用 `{"run_id":"<返回的 run_id>"}` 调用 `query_workflow_run`。只有 `status="succeeded"` 表示运行成功，还需按用户目标检查输出。不要把工作流 `run_id` 交给文档 `task_id` 查询工具。创建、上传或运行响应不明时，不自动重复提交。
+
+工作流修改目前只能在 ADP 网站界面完成，修改后先在网站测试并重新发布，再通过 API 运行。这些工具支持从官方模板创建应用；自定义工作流创建和工作流编辑仍需在网站操作。
+
+工作流工具支持 `accept_language` 和 `timeout_seconds`。创建、上传、运行和查询须使用同一账号区域：`zh` 访问中国区，`en` 访问全球区，也可统一配置 `ADP_ACCEPT_LANGUAGE`。
+
 ## 工具输入参数
 
 ### 文档解析与 OOTB 抽取工具
@@ -142,6 +189,10 @@ ADP MCP Server 以 **stdio** 方式运行，客户端通过 `npx` 拉起本地�
 | 参数 | 类型 | 必填 | 说明 |
 |------|------|------|------|
 | `chunk` | string | 是 | 上传的文件。本地文件路径、`file://` 地址或 Base64 编码内容 |
+| `application_id` | string | 否 | 创建返回的账号工作流应用 ID；`sharing_scope="application"` 时必填 |
+| `sharing_scope` | string | 否 | 工作流文件使用 `application`，临时文档文件可使用 `user` |
+| `accept_language` | string | 否 | 账号区域和返回语言，`zh` 或 `en` |
+| `timeout_seconds` | integer | 否 | 请求超时秒数，默认 300，范围 1–900 |
 
 返回结果中包含 `data.download_url`，可直接作为解析或抽取工具的 `file` 参数。
 

@@ -1,6 +1,8 @@
 import { readFile } from "node:fs/promises";
 import { basename } from "node:path";
 import { fileURLToPath } from "node:url";
+import { AjvJsonSchemaValidator } from "@modelcontextprotocol/sdk/validation/ajv-provider.js";
+import type { JsonSchemaType } from "@modelcontextprotocol/sdk/validation/types.js";
 import type { AuthKind, JsonObject, Operation, RequestConfig } from "./types.js";
 
 const DOMESTIC_BASE_URL = "https://adp.laiye.com";
@@ -8,6 +10,7 @@ const GLOBAL_BASE_URL = "https://adp-global.laiye.com";
 const DEFAULT_TENANT_NAME = "laiye";
 const DEFAULT_ACCEPT_LANGUAGE = "zh";
 const DEFAULT_API_SOURCE = "npm-mcp";
+const schemaValidator = new AjvJsonSchemaValidator();
 
 export function resolveConfig(args: JsonObject): RequestConfig {
   const acceptLanguage = readString(args.accept_language) ?? process.env.ADP_ACCEPT_LANGUAGE ?? DEFAULT_ACCEPT_LANGUAGE;
@@ -22,6 +25,10 @@ export function resolveConfig(args: JsonObject): RequestConfig {
 }
 
 export async function callAdpOperation(operation: Operation, args: JsonObject): Promise<unknown> {
+  if (operation.validateInput) {
+    const validation = schemaValidator.getValidator(operation.inputSchema as JsonSchemaType)(args);
+    if (!validation.valid) throw new Error(`Invalid tool arguments: ${validation.errorMessage}`);
+  }
   const config = resolveConfig(args);
   const url = buildUrl(config.baseUrl, operation, args, config);
   const headers = buildHeaders(operation.auth, config);
@@ -32,15 +39,15 @@ export async function callAdpOperation(operation: Operation, args: JsonObject): 
 
   if (operation.bodyMode === "json") {
     headers.set("Content-Type", "application/json");
-    return request(url, operation.method, headers, JSON.stringify(pickBody(args, operation)), getTimeoutMs(args));
+    return validateResponse(operation, args, await request(url, operation.method, headers, JSON.stringify(pickBody(args, operation)), getTimeoutMs(args)));
   }
 
   if (operation.bodyMode === "multipart") {
-    return request(url, operation.method, headers, await buildMultipartBody(args), getTimeoutMs(args));
+    return validateResponse(operation, args, await request(url, operation.method, headers, await buildMultipartBody(args, operation), getTimeoutMs(args)));
   }
 
   try {
-    return await request(url, operation.method, headers, undefined, getTimeoutMs(args));
+    return validateResponse(operation, args, await request(url, operation.method, headers, undefined, getTimeoutMs(args)));
   } catch (error) {
     if (!operation.fallbackPath) {
       throw error;
@@ -49,6 +56,22 @@ export async function callAdpOperation(operation: Operation, args: JsonObject): 
     const fallbackUrl = buildUrl(config.baseUrl, operation, args, config, operation.fallbackPath);
     return request(fallbackUrl, operation.method, headers, undefined, getTimeoutMs(args));
   }
+}
+
+function validateResponse(operation: Operation, args: JsonObject, result: unknown): unknown {
+  if (operation.validateOutput && operation.outputSchema) {
+    const validation = schemaValidator.getValidator(operation.outputSchema as JsonSchemaType)(result);
+    if (!validation.valid) {
+      throw new Error(`ADP response did not satisfy the tool contract; request acceptance may be unknown. Do not automatically resubmit. ${validation.errorMessage}`);
+    }
+  }
+  for (const field of operation.responseIdentityFields ?? []) {
+    const data = (result as { data?: JsonObject })?.data;
+    if (data?.[field] !== args[field]) {
+      throw new Error(`ADP response ${field} did not match the request. Do not automatically resubmit.`);
+    }
+  }
+  return result;
 }
 
 function buildHeaders(_auth: AuthKind, config: RequestConfig): Headers {
@@ -93,7 +116,11 @@ function buildUrl(
     return encodeURIComponent(String(value));
   });
 
-  return new URL(path, baseUrl).toString();
+  const url = new URL(path, baseUrl);
+  for (const param of operation.queryParams ?? []) {
+    if (args[param] !== undefined && args[param] !== null) url.searchParams.set(param, String(args[param]));
+  }
+  return url.toString();
 }
 
 function pickBody(args: JsonObject, operation: Operation): JsonObject {
@@ -136,7 +163,7 @@ function shouldUseAsyncPath(operation: Operation, args: JsonObject): operation i
   return Boolean(operation.asyncPath && args.wait === false);
 }
 
-async function buildMultipartBody(args: JsonObject): Promise<FormData> {
+async function buildMultipartBody(args: JsonObject, operation: Operation): Promise<FormData> {
   const chunk = readString(args.chunk);
   if (!chunk) {
     throw new Error("chunk is required.");
@@ -146,6 +173,9 @@ async function buildMultipartBody(args: JsonObject): Promise<FormData> {
   const upload = await readUploadFile(chunk);
 
   formData.set("chunk", upload.blob, upload.fileName);
+  for (const field of operation.bodyFields ?? []) {
+    if (args[field] !== undefined && args[field] !== null) formData.set(field, String(args[field]));
+  }
   return formData;
 }
 

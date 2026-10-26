@@ -28,6 +28,10 @@ export interface Operation {
   mode?: "extract" | "recognize";
   bodyFields?: string[];
   pathParams?: string[];
+  queryParams?: string[];
+  validateInput?: boolean;
+  validateOutput?: boolean;
+  responseIdentityFields?: string[];
   usesTenant?: boolean;
   usesAcceptLanguage?: boolean;
 }

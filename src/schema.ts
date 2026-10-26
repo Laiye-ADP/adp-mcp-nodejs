@@ -101,8 +101,26 @@ export const uploadTemporaryFileInputSchema: JsonSchema = {
     chunk: {
       type: "string",
       description: "上传的文件。本地文件路径、file:// 地址或 Base64 编码"
-    }
+    },
+    application_id: {
+      type: "string",
+      minLength: 1,
+      description: "工作流应用 ID；从模板创建时使用创建响应中的 application_id。"
+    },
+    sharing_scope: {
+      type: "string",
+      enum: ["user", "application"],
+      description: "工作流文件使用 application 并提供 application_id；临时文档文件可使用 user。"
+    },
+    accept_language: documentFileProperties.accept_language,
+    timeout_seconds: { type: "integer", minimum: 1, maximum: 900, default: 300 }
   },
+  allOf: [
+    {
+      if: { properties: { sharing_scope: { const: "application" } }, required: ["sharing_scope"] },
+      then: { required: ["application_id"] }
+    }
+  ],
   additionalProperties: false
 };
 
@@ -196,4 +214,117 @@ export const customExtractInputSchema: JsonSchema = {
     }
   },
   additionalProperties: false
+};
+
+export const workflowTemplateKeys = ["finance_payable", "expense_reimbursement", "financial_report_extraction"];
+
+const workflowClientProperties = {
+  accept_language: documentFileProperties.accept_language,
+  timeout_seconds: { type: "integer", minimum: 1, maximum: 900, default: 300 }
+};
+
+export const workflowTemplateListInputSchema: JsonSchema = {
+  type: "object",
+  properties: {
+    search: { type: "string", description: "模板名称搜索词。" },
+    offset: { type: "integer", minimum: 0, default: 0 },
+    size: { type: "integer", minimum: 1, maximum: 100, default: 100 },
+    ...workflowClientProperties
+  },
+  additionalProperties: false
+};
+
+export const createWorkflowApplicationInputSchema: JsonSchema = {
+  type: "object",
+  required: ["template_key"],
+  properties: {
+    template_key: { type: "string", enum: workflowTemplateKeys, description: "官方业务工作流模板键。" },
+    ...workflowClientProperties
+  },
+  additionalProperties: false
+};
+
+export const createWorkflowApplicationOutputSchema: JsonSchema = {
+  type: "object",
+  required: ["code", "data"],
+  properties: {
+    code: { const: "success" },
+    data: {
+      type: "object",
+      required: ["template_key", "template_version", "application_id", "application_name", "release_version_id", "application_status", "can_run"],
+      properties: {
+        template_key: { type: "string", enum: workflowTemplateKeys },
+        template_version: { type: "string", minLength: 1 },
+        application_id: { type: "string", minLength: 1 },
+        application_name: { type: "string", minLength: 1 },
+        release_version_id: { type: "string", minLength: 1 },
+        application_status: { const: "published" },
+        can_run: { const: true }
+      },
+      additionalProperties: false
+    }
+  },
+  additionalProperties: true
+};
+
+export const workflowRunInputSchema: JsonSchema = {
+  type: "object",
+  required: ["application_id"],
+  properties: {
+    application_id: { type: "string", minLength: 1, description: "已发布账号应用 ID；从模板创建时使用创建响应的 application_id，不能使用模板目录 ID。" },
+    release_version_id: { type: "string", minLength: 1, description: "可选的已发布版本 ID，不能自行推测。" },
+    session_id: { type: "string", minLength: 1 },
+    inputs: { type: "object", additionalProperties: true, description: "按工作流配置和用户实际输入提供，不猜测字段。" },
+    files: {
+      type: "array",
+      items: {
+        type: "object",
+        required: ["url", "name", "mime_type"],
+        properties: {
+          url: { type: "string", pattern: "^https?://", description: "上传返回的 download_url 或可访问的文件 URL。" },
+          name: { type: "string", minLength: 1 },
+          mime_type: { type: "string", minLength: 1 },
+          size: { type: "integer", minimum: 0 },
+          metadata: { type: "object", additionalProperties: true }
+        },
+        additionalProperties: false
+      }
+    },
+    wait: { type: "boolean", default: true, description: "默认同步；只有用户明确要求异步时传 false。" },
+    ...workflowClientProperties
+  },
+  additionalProperties: false
+};
+
+export const workflowQueryInputSchema: JsonSchema = {
+  type: "object",
+  required: ["run_id"],
+  properties: {
+    run_id: {
+      type: "string",
+      minLength: 1,
+      pattern: "^(?!\\.{1,2}$)[^/\\\\?#%\\u0000-\\u001F\\u007F]+$",
+      description: "工作流运行返回的 run_id，不是文档 task_id。"
+    },
+    ...workflowClientProperties
+  },
+  additionalProperties: false
+};
+
+export const workflowRunOutputSchema: JsonSchema = {
+  type: "object",
+  required: ["code", "data"],
+  properties: {
+    code: { const: "success" },
+    data: {
+      type: "object",
+      required: ["run_id", "status"],
+      properties: {
+        run_id: { type: "string", minLength: 1 },
+        status: { type: "string", enum: ["pending", "running", "paused", "succeeded", "failed", "cancelled", "timeout"] }
+      },
+      additionalProperties: true
+    }
+  },
+  additionalProperties: true
 };
