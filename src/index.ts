@@ -3,6 +3,7 @@
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
+import { readFileSync } from "node:fs";
 import { callAdpOperation } from "./adp-client.js";
 import { operations } from "./operations.js";
 import type { JsonObject } from "./types.js";
@@ -10,7 +11,7 @@ import type { JsonObject } from "./types.js";
 const server = new Server(
   {
     name: "laiye-adp-mcp-nodejs",
-    version: "0.1.0"
+    version: JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).version
   },
   {
     capabilities: {

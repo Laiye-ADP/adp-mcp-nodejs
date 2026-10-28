@@ -113,21 +113,21 @@ In addition to the out-of-the-box tools above, MCP provides two fixed tools for 
 
 | Tool Name | Description |
 |-----------|-------------|
-| `list_workflow_templates` | Query official templates by name with `search`, `offset` and `size`. Catalog IDs are for discovery. |
+| `list_workflow_templates` | Query official templates by name with `search`, `offset` and `size`. |
 | `create_workflow_application_from_template` | Create and publish an account application, or reuse the corresponding runnable application. |
-| `upload_temporary_file` | For workflow files, pass the created `application_id` and `sharing_scope="application"`. |
-| `execute_workflow_app` | Run a published account application, synchronously by default; use `wait=false` for an explicitly requested async run. |
+| `upload_temporary_file` | Use an account `application_id` with `sharing_scope="application"`; before directly running a template, use `sharing_scope="user"` and omit `application_id`. |
+| `execute_workflow_app` | Run a published account application, or directly run one of the three official templates as an alternative. Synchronous by default; use `wait=false` for an explicitly requested async run. |
 | `query_workflow_run` | Query a workflow by `run_id`, preserving its complete `output` and `error`. |
 
 Supported template keys:
 
-| Template | `template_key` |
-|----------|----------------|
-| Accounts payable | `finance_payable` |
-| Expense reimbursement | `expense_reimbursement` |
-| Financial report extraction | `financial_report_extraction` |
+| Template | `template_key` | Fixed template ID |
+|----------|----------------|-------------------|
+| Accounts payable | `finance_payable` | `wftp_app_n8q4v2m7x5p1r9t6c3a0b8d2` |
+| Expense reimbursement | `expense_reimbursement` | `wftp_app_h3k9s1v6p4x8q2m7c5t0a9r1` |
+| Financial report extraction | `financial_report_extraction` | `wftp_app_y6p2m8q4v1c9t3x7n5r0h2k6` |
 
-Use the matching template to **create and publish an application first**, then upload and run using the returned account `application_id`. Creation does not require `can_run=true` in the template catalog. Repeated creation reuses an existing runnable application and preserves its template version. Do not run using the catalog's `application_id`.
+**Recommended:** use the matching template to create and publish an application first, then upload and run using the returned account `application_id`. Creation does not require `can_run=true` in the template catalog. Repeated creation reuses an existing runnable application and preserves its template version.
 
 Call `create_workflow_application_from_template`:
 
@@ -151,6 +151,25 @@ Call `execute_workflow_app` using the upload response's `download_url`, `file_na
 ```
 
 For async runs, add `"wait":false`, save `data.run_id`, and call `query_workflow_run` with `{"run_id":"<returned run_id>"}`. A run is successful only when `status="succeeded"`; also inspect the output against the user's request. Do not use document `task_id` query tools for workflow runs. If a creation, upload or run response is uncertain, do not automatically resubmit.
+
+**Alternative: directly run a workflow template.** When the user chooses this option, call `execute_workflow_app` with either `template_key` or one of the fixed template IDs above as `application_id`, never both. The run request automatically creates and publishes a corresponding runnable account application when needed, or reuses an existing one. No separate catalog, application-list or create call is needed. Do not pass `release_version_id` in template mode; an actual account application's ID still supports an explicit published version.
+
+For a local file, first call `upload_temporary_file` with user scope so that the account application created or reused by the run can access the file:
+
+```json
+{"chunk":"/path/to/report.pdf","sharing_scope":"user"}
+```
+
+Then use the returned file fields with `execute_workflow_app`:
+
+```json
+{
+  "template_key":"financial_report_extraction",
+  "files":[{"url":"https://files.example.com/report.pdf","name":"report.pdf","mime_type":"application/pdf"}]
+}
+```
+
+The equivalent target is `"application_id":"wftp_app_y6p2m8q4v1c9t3x7n5r0h2k6"` instead of `template_key`. Add `"wait":false` for asynchronous execution, then query the returned `run_id` in the same way. Uploads do not accept fixed template IDs: omit `application_id` with user scope, or create the application first and use its real account ID with application scope.
 
 Workflow changes currently require the ADP website interface. Test and republish there before running the application through the API again. These tools support creating an application from an official template; custom workflow creation and workflow editing remain website operations.
 
@@ -188,8 +207,8 @@ Common input parameters for out-of-the-box tools:
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `chunk` | string | Yes | File to upload. Local file path, `file://` URL, or Base64-encoded content |
-| `application_id` | string | No | Created account workflow application ID; required when `sharing_scope="application"` |
-| `sharing_scope` | string | No | `application` for workflow files, or `user` for temporary document files |
+| `application_id` | string | No | Created account workflow application ID; required when `sharing_scope="application"`. Fixed template IDs are not accepted for uploads. |
+| `sharing_scope` | string | No | `application` with a created account app ID, or `user` without an app ID before directly running a template; `user` also supports temporary document files |
 | `accept_language` | string | No | Account region and response language, `zh` or `en` |
 | `timeout_seconds` | integer | No | Request timeout in seconds, default 300, range 1–900 |
 

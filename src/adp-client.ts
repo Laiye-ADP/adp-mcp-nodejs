@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { AjvJsonSchemaValidator } from "@modelcontextprotocol/sdk/validation/ajv-provider.js";
 import type { JsonSchemaType } from "@modelcontextprotocol/sdk/validation/types.js";
 import type { AuthKind, JsonObject, Operation, RequestConfig } from "./types.js";
+import { workflowTemplateApplicationIds } from "./workflow-templates.js";
 
 const DOMESTIC_BASE_URL = "https://adp.laiye.com";
 const GLOBAL_BASE_URL = "https://adp-global.laiye.com";
@@ -28,6 +29,9 @@ export async function callAdpOperation(operation: Operation, args: JsonObject): 
   if (operation.validateInput) {
     const validation = schemaValidator.getValidator(operation.inputSchema as JsonSchemaType)(args);
     if (!validation.valid) throw new Error(`Invalid tool arguments: ${validation.errorMessage}`);
+  }
+  if (operation.name === "upload_temporary_file" && typeof args.application_id === "string" && args.application_id.startsWith("wftp_app_")) {
+    throw new Error("Template IDs cannot be used for uploads. Create an application first and use its application_id, or upload with sharing_scope=user and omit application_id before running the template.");
   }
   const config = resolveConfig(args);
   const url = buildUrl(config.baseUrl, operation, args, config);
@@ -154,6 +158,10 @@ function pickBody(args: JsonObject, operation: Operation): JsonObject {
     if (args[field] !== undefined) {
       body[field] = args[field];
     }
+  }
+
+  if (operation.name === "execute_workflow_app" && typeof args.template_key === "string") {
+    body.application_id = workflowTemplateApplicationIds[args.template_key as keyof typeof workflowTemplateApplicationIds];
   }
 
   return body;

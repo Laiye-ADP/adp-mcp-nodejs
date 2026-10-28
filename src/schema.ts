@@ -1,4 +1,5 @@
 import type { JsonSchema } from "./types.js";
+import { workflowTemplateIds, workflowTemplateKeys } from "./workflow-templates.js";
 
 const documentFileProperties = {
   file: {
@@ -105,12 +106,12 @@ export const uploadTemporaryFileInputSchema: JsonSchema = {
     application_id: {
       type: "string",
       minLength: 1,
-      description: "工作流应用 ID；从模板创建时使用创建响应中的 application_id。"
+      description: "创建响应中的账号工作流应用 ID，不接受模板固定 ID；直接运行模板时使用 user 范围上传并省略 application_id。"
     },
     sharing_scope: {
       type: "string",
       enum: ["user", "application"],
-      description: "工作流文件使用 application 并提供 application_id；临时文档文件可使用 user。"
+      description: "已创建的工作流应用使用 application 并提供账号 application_id；直接运行模板前使用 user 并省略 application_id，让当前用户创建或复用的应用访问文件。"
     },
     accept_language: documentFileProperties.accept_language,
     timeout_seconds: { type: "integer", minimum: 1, maximum: 900, default: 300 }
@@ -216,8 +217,6 @@ export const customExtractInputSchema: JsonSchema = {
   additionalProperties: false
 };
 
-export const workflowTemplateKeys = ["finance_payable", "expense_reimbursement", "financial_report_extraction"];
-
 const workflowClientProperties = {
   accept_language: documentFileProperties.accept_language,
   timeout_seconds: { type: "integer", minimum: 1, maximum: 900, default: 300 }
@@ -269,10 +268,18 @@ export const createWorkflowApplicationOutputSchema: JsonSchema = {
 
 export const workflowRunInputSchema: JsonSchema = {
   type: "object",
-  required: ["application_id"],
+  oneOf: [{ required: ["application_id"] }, { required: ["template_key"] }],
   properties: {
-    application_id: { type: "string", minLength: 1, description: "已发布账号应用 ID；从模板创建时使用创建响应的 application_id，不能使用模板目录 ID。" },
-    release_version_id: { type: "string", minLength: 1, description: "可选的已发布版本 ID，不能自行推测。" },
+    application_id: {
+      type: "string", minLength: 1,
+      anyOf: [{ enum: workflowTemplateIds }, { pattern: "^(?!wftp_app_)\\S+$" }],
+      description: "已发布账号应用 ID（推荐先从模板创建）；也支持三个官方模板的固定 ID 作为直接运行备选。与 template_key 二选一。"
+    },
+    template_key: {
+      type: "string", enum: workflowTemplateKeys,
+      description: "备选：直接运行官方模板，没有对应可运行应用时自动创建并发布，已有时复用。与 application_id 二选一，不能指定 release_version_id。"
+    },
+    release_version_id: { type: "string", minLength: 1, description: "账号应用可选的已发布版本 ID，不能自行推测；直接运行模板时不可传。" },
     session_id: { type: "string", minLength: 1 },
     inputs: { type: "object", additionalProperties: true, description: "按工作流配置和用户实际输入提供，不猜测字段。" },
     files: {
@@ -293,6 +300,13 @@ export const workflowRunInputSchema: JsonSchema = {
     wait: { type: "boolean", default: true, description: "默认同步；只有用户明确要求异步时传 false。" },
     ...workflowClientProperties
   },
+  allOf: [{
+    if: { anyOf: [
+      { required: ["template_key"] },
+      { properties: { application_id: { enum: workflowTemplateIds } }, required: ["application_id"] }
+    ] },
+    then: { not: { required: ["release_version_id"] } }
+  }],
   additionalProperties: false
 };
 

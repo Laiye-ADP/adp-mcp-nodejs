@@ -114,21 +114,21 @@ ADP MCP Server 以 **stdio** 方式运行，客户端通过 `npx` 拉起本地�
 
 | 工具名 | 说明 |
 |--------|------|
-| `list_workflow_templates` | 按模板名称查询官方模板，支持 `search`、`offset`、`size`；目录 ID 仅用于发现。 |
+| `list_workflow_templates` | 按模板名称查询官方模板，支持 `search`、`offset`、`size`。 |
 | `create_workflow_application_from_template` | 从模板创建并发布当前账号的应用，已有对应可运行应用时复用。 |
-| `upload_temporary_file` | 工作流文件传入创建响应中的 `application_id` 和 `sharing_scope="application"`。 |
-| `execute_workflow_app` | 运行已发布的账号应用，默认同步；用户明确要求异步时传 `wait=false`。 |
+| `upload_temporary_file` | 已创建的应用使用账号 `application_id` 和 `sharing_scope="application"`；直接运行模板前使用 `sharing_scope="user"` 并省略 `application_id`。 |
+| `execute_workflow_app` | 运行已发布的账号应用，或作为备选直接运行三个官方模板之一；默认同步，用户明确要求异步时传 `wait=false`。 |
 | `query_workflow_run` | 用 `run_id` 查询工作流，保留完整 `output` 和 `error`。 |
 
 支持的模板键：
 
-| 模板 | `template_key` |
-|------|----------------|
-| 财务应付 | `finance_payable` |
-| 费用报销 | `expense_reimbursement` |
-| 金融财报 | `financial_report_extraction` |
+| 模板 | `template_key` | 模板固定 ID |
+|------|----------------|-------------|
+| 财务应付 | `finance_payable` | `wftp_app_n8q4v2m7x5p1r9t6c3a0b8d2` |
+| 费用报销 | `expense_reimbursement` | `wftp_app_h3k9s1v6p4x8q2m7c5t0a9r1` |
+| 金融财报 | `financial_report_extraction` | `wftp_app_y6p2m8q4v1c9t3x7n5r0h2k6` |
 
-选择与用户目标匹配的模板，**先创建并发布应用**，再使用返回的账号 `application_id` 上传文件和运行。创建不要求模板目录预先 `can_run=true`；重复创建会复用已有可运行应用，并保留其实际模板版本。不要使用模板目录中的 `application_id` 运行。
+**推荐方式：** 选择与用户目标匹配的模板，先创建并发布应用，再使用返回的账号 `application_id` 上传文件和运行。创建不要求模板目录预先 `can_run=true`；重复创建会复用已有可运行应用，并保留其实际模板版本。
 
 调用 `create_workflow_application_from_template`：
 
@@ -152,6 +152,25 @@ ADP MCP Server 以 **stdio** 方式运行，客户端通过 `npx` 拉起本地�
 ```
 
 异步运行加 `"wait":false`，保存 `data.run_id`，再用 `{"run_id":"<返回的 run_id>"}` 调用 `query_workflow_run`。只有 `status="succeeded"` 表示运行成功，还需按用户目标检查输出。不要把工作流 `run_id` 交给文档 `task_id` 查询工具。创建、上传或运行响应不明时，不自动重复提交。
+
+**备选方式：直接运行工作流模板。** 用户选择此方式时，调用 `execute_workflow_app`，传入 `template_key`，或将上表的模板固定 ID 作为 `application_id`，两者只能选一个。运行请求会在没有对应可运行账号应用时自动创建并发布，已有时复用，无需先查询模板目录、应用列表或单独调用创建工具。模板模式不能传 `release_version_id`；使用真实账号应用 ID 时仍可指定已发布版本。
+
+本地文件先按用户范围调用 `upload_temporary_file`，让随后创建或复用的账号应用可以访问该文件：
+
+```json
+{"chunk":"/path/to/report.pdf","sharing_scope":"user"}
+```
+
+再使用上传响应中的文件字段调用 `execute_workflow_app`：
+
+```json
+{
+  "template_key":"financial_report_extraction",
+  "files":[{"url":"https://files.example.com/report.pdf","name":"report.pdf","mime_type":"application/pdf"}]
+}
+```
+
+也可将目标替换为 `"application_id":"wftp_app_y6p2m8q4v1c9t3x7n5r0h2k6"`，省略 `template_key`。异步运行同样加 `"wait":false`，再查询返回的 `run_id`。上传不接受模板固定 ID：应使用用户范围并省略 `application_id`，或先创建应用，再用真实账号应用 ID 按应用范围上传。
 
 工作流修改目前只能在 ADP 网站界面完成，修改后先在网站测试并重新发布，再通过 API 运行。这些工具支持从官方模板创建应用；自定义工作流创建和工作流编辑仍需在网站操作。
 
@@ -189,8 +208,8 @@ ADP MCP Server 以 **stdio** 方式运行，客户端通过 `npx` 拉起本地�
 | 参数 | 类型 | 必填 | 说明 |
 |------|------|------|------|
 | `chunk` | string | 是 | 上传的文件。本地文件路径、`file://` 地址或 Base64 编码内容 |
-| `application_id` | string | 否 | 创建返回的账号工作流应用 ID；`sharing_scope="application"` 时必填 |
-| `sharing_scope` | string | 否 | 工作流文件使用 `application`，临时文档文件可使用 `user` |
+| `application_id` | string | 否 | 创建返回的账号工作流应用 ID；`sharing_scope="application"` 时必填；上传不接受模板固定 ID |
+| `sharing_scope` | string | 否 | 已创建应用使用 `application` 并提供账号应用 ID；直接运行模板前使用 `user` 并省略应用 ID；临时文档文件也可使用 `user` |
 | `accept_language` | string | 否 | 账号区域和返回语言，`zh` 或 `en` |
 | `timeout_seconds` | integer | 否 | 请求超时秒数，默认 300，范围 1–900 |
 
