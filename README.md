@@ -102,12 +102,65 @@ In addition to the out-of-the-box tools above, MCP provides two fixed tools for 
 
 | Tool Name | Title | Description |
 |-----------|-------|-------------|
-| `list_custom_extract_apps` | List Custom Extraction Apps | List all custom document extraction apps created by the current user, returning each app's ID, name, description, labels and output field definitions. Use this to find the `app_id` needed by `execute_custom_extract_app`. |
+| `list_custom_extract_apps` | List Custom Extraction Apps | Read every page of the current user's extraction apps: 1406/1423/1424/1425, including unpublished apps. `output_schema` only represents published configurations and may be null. |
 | `execute_custom_extract_app` | Execute Custom Extraction App | Process a file using a specified custom document extraction app. Use `list_custom_extract_apps` first to obtain the `app_id`. |
 
 **Workflow:** Call `list_custom_extract_apps` to browse available apps and get the target `app_id`, then call `execute_custom_extract_app` with the `app_id` and file to perform extraction.
 
 ---
+
+### Standalone Classification, Routed Extraction and Export
+
+| Tool | Purpose |
+| --- | --- |
+| `list_classification_apps` | Explicitly select the current user's 1426 classification apps and read every page |
+| `classify_document` | Return document-instance categories and original pages; synchronous by default, or create an async task with `wait=false` |
+| `query_classify_task` | Query only standalone classification async tasks |
+| `extract_routed_document` | Classify by candidate app names/descriptions and extract each document instance; synchronous by default, or async with `wait=false` |
+| `query_routed_task` | Query only routed extraction async tasks |
+| `export_workflow_runs` | Export workflow results when explicitly requested by the user, returning a temporary download link; restricted preview, no administrator role required |
+
+For classification, configure a 1426 app in ADP, discover its `app_id` with `list_classification_apps`, then call `classify_document`. For routing, select 1425/1423/1424 candidates through `list_custom_extract_apps` and pass their IDs as `extract_routed_document.app_ids`; no classification app ID is needed.
+
+Classification and routing accept only PDF/PNG/JPEG, at most 100 MB and 260 original pages, even when selecting a subset. `model_params.pages` contains distinct original pages starting at 1. Routing accepts 1–10 distinct app IDs; trimmed app names must also be unique ignoring case. A page may match multiple apps.
+
+```json
+{
+  "app_ids": ["your-1425-app", "your-1423-app"],
+  "file": "https://files.example.com/materials.pdf",
+  "file_name": "materials.pdf",
+  "wait": false,
+  "model_params": {
+    "pages": [1, 2],
+    "enable_highlight": true,
+    "enable_field_value_translation": false,
+    "enable_confidence": null
+  }
+}
+```
+
+For routing, the three per-call switches are inside `model_params` alongside `pages`, affecting every child app. Omission/null inherits each app setting; false disables it without saving a configuration or version. Single-app extraction places these switches at the top level.
+
+Classification returns `segments`. Routing groups `extraction_result` by app, with each `object_values` entry representing one document instance and pages referring to the original file. Failed instances retain `error` alongside successful results. `partial_success` and `failed` set MCP `isError=true` while preserving complete `structuredContent` and the original `message`. All-unmatched input may still be `success` with empty results. A synchronous `task_id` identifies the call and does not create a queryable async task.
+
+Exports are limited to runs the current account may access in the current tenant for the specified `application_id`. Supplying an ID does not grant access to another user's data.
+
+| `report_mode` | `format` | Selection and result |
+| --- | --- | --- |
+| `merged` (default) | excel/word/markdown/html/json | One combined file; omitted/null/empty `run_ids` select matching runs for the current user |
+| `per_run` | excel/word/markdown/html/json | One file per run in a ZIP; supports the same selection filters |
+| `task_data` | excel/json | Exactly one nonblank run ID; saved business data without attachments |
+| `task_package` | Explicit word/markdown/html required | Exactly one nonblank run ID; report and authorized attachments in a ZIP |
+
+General exports select at most 200 runs, default to successful runs, and may include others with `include_failed_runs=true`; the row limit is 500000. `node_ids`, `node_types`, `variable_filters` (input variable dot paths), `primary_key_variable` and `max_text_length` apply to general export; the last defaults to 10000 and ranges from 1–30000. Task modes reject nonempty node/type/variable filters and require a finished task with retained exportable business data. Task `locale` is zh-CN/en-US, defaulting to the saved display language; it does not rerun extraction or retranslate field values and differs from the account-region selector `accept_language`.
+
+The 200-run limit applies to runs included in export. When selecting all eligible history, `skipped_runs` and the corresponding `total_runs` can exceed 200 without exceeding the export limit.
+
+```json
+{"application_id":"your-workflow-app","run_ids":["your-run"],"report_mode":"task_package","format":"html","locale":"en-US"}
+```
+
+Exports return `file_id`, `download_url`, `filename`, `file_size`, format, mode, run statistics and summaries. Link lifetime depends on deployment. Do not resubmit automatically when acceptance is uncertain.
 
 ### Workflow Applications
 
@@ -180,15 +233,17 @@ The workflow tools accept `accept_language` and `timeout_seconds`. Use the same 
 | Tool Name | Title | Description |
 |-----------|-------|-------------|
 | `query_parse_task` | Query Async Document Parsing Task | Query the `task_id` returned by `parse_document` with `wait=false`, using `GET .../app/doc/recognize/query/task/{task_id}`. |
-| `query_extract_task` | Query Async Document Extraction Task | Query the `task_id` returned by `extract_*` or `execute_custom_extract_app` with `wait=false`, using `GET .../app/doc/extract/query/task/{task_id}`. |
+| `query_extract_task` | Query Async Document Extraction Task | Query async IDs from preset invoice/card tools or `execute_custom_extract_app`, using `GET .../app/doc/extract/query/task/{task_id}`; excludes routed tasks. |
+| `query_classify_task` | Query Async Document Classification Task | Query only async IDs from `classify_document`, using `GET .../app/doc/classify/query/task/{task_id}`. |
+| `query_routed_task` | Query Async Routed Extraction Task | Query only async IDs from `extract_routed_document`, using `GET .../app/doc/extract/routed/query/task/{task_id}`. |
 
-Both tools return the current task status and any available results. If processing is unfinished, query again with the same tool. Choose the query tool based on the tool that created the task; parsing and extraction IDs are not interchangeable, and a failed query does not switch task types. Use the same account region for creation and query. For a workflow `run_id`, use `query_workflow_run`.
+All four query tools return current status and available results. If unfinished, query again with the same tool. Select the endpoint from the creating tool; IDs cannot cross task types, even after a failed query. Use the same account region for creation and query. Workflow `run_id` uses `query_workflow_run`.
 
-These tools replace `query_task` and `get_result`. Refresh your client's tool list after upgrading.
+Parsing/single-app extraction queries replace `query_task` and `get_result`. Refresh your client's tool list after upgrading.
 
 ## Tool Input Parameters
 
-### query_parse_task / query_extract_task
+### query_parse_task / query_extract_task / query_classify_task / query_routed_task
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -203,7 +258,8 @@ Common input parameters for out-of-the-box tools:
 |-----------|------|----------|-------------|
 | `file` | string | Yes | File URL or Base64-encoded content |
 | `file_name` | string | No | File name (with extension) |
-| `with_rec_result` | boolean | No | Whether to include OCR intermediate results, default `true` |
+| `with_rec_result` | boolean | No | Return document parsing results, default `true`; high-speed custom extraction does not return them |
+| `model_params` | object or null | No | Capability-specific `pages`, `scale`, `keep_content`, `disable_collaboration`, `page_task_timeout_seconds`, `card_type` and `enable_multi_ticket` |
 | `wait` | boolean | No | Whether to wait synchronously for the result, default `true` |
 | `timeout_seconds` | integer | No | Synchronous wait timeout in seconds, default `300`, range 1–900 |
 
@@ -219,6 +275,12 @@ Common input parameters for out-of-the-box tools:
 |-----------|------|----------|-------------|
 | `enable_multi_ticket` | boolean | No | Split multiple invoices in one file into separate results, default `true`. Applies only to international and Southeast Asia fast modes without changing app configuration. |
 | `enable_field_value_translation` | boolean or null | No | Enable (`true`) or disable (`false`) field-value translation for this extraction only. Omission or `null` uses the saved app configuration without changing it. The target language follows `accept_language` or `ADP_ACCEPT_LANGUAGE`. |
+
+`extract_global_invoice_fast`, `extract_sea_invoice_fast` and `execute_custom_extract_app` also accept top-level `enable_highlight` and `enable_confidence`: true/false overrides only this call; omitted/null inherits app settings. Translation is written separately to `field_value_translation` without replacing the original value. Defaults returned with confidence evaluation disabled are not evaluated scores.
+
+Single-app `model_params.pages` does not have the classification/routing limit of 260 entries. Native XLSX/Markdown availability for classic extraction, 1425 and 1423/1424 depends on deployment and authorization; Base64 requires the correct `file_name` extension. Markdown has logical page 1 only. XLSX `spreadsheet_billing` and preview manifest fields are retained unchanged. 1425 sync/async always disables human collaboration; `keep_content` does not make it return parsing results. `page_task_timeout_seconds` controls waiting for per-page result preparation, not the entire extraction timeout.
+
+For overseas multi-ticket results, `tickets` and the `invoice_tickets/receipt_tickets` grouped projection represent the same batch. Consume one projection to avoid double counting. The routed API does not repeat results as `tickets`.
 
 ### upload_temporary_file
 
@@ -242,7 +304,7 @@ In addition to the parameters above:
 
 ### list_custom_extract_apps
 
-No input parameters required.
+Optional `ai_function` is 1406/1423/1424/1425; omission reads all these extraction capabilities without defaulting to 1425. Also accepts `accept_language` and `timeout_seconds`. Discovery fixes `app_type=1`, `owner_only=true`, `published_only=false`, reads every page, filters other capabilities and recalculates the returned total. `published_version_id` identifies a publication record; `output_schema` describes published business fields and may be null. Unpublished does not mean uncallable.
 
 **Parsing/extraction file input methods:**
 
@@ -421,6 +483,8 @@ No input parameters required.
 
 ## Task Status Codes
 
+The numeric states below apply to legacy parsing/single-app extraction. Standalone classification uses `pending/running/success/failed`; routing also has `partial_success`. Do not poll these using numeric states. Original states/results are preserved; failed or partially failed results add MCP `isError=true`.
+
 | Status Code | MCP Status | Description |
 |-------------|------------|-------------|
 | 0 | running | Unknown |
@@ -433,6 +497,8 @@ No input parameters required.
 ---
 
 ## Supported File Formats
+
+Availability in this table depends on the selected app and deployment; standalone classification and routing strictly accept PDF/PNG/JPEG only.
 
 | Format | Extensions | Notes |
 |--------|------------|-------|

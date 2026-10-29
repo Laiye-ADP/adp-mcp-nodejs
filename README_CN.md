@@ -103,12 +103,65 @@ ADP MCP Server 以 **stdio** 方式运行，客户端通过 `npx` 拉起本地�
 
 | 工具名 | 标题 | 说明 |
 |--------|------|------|
-| `list_custom_extract_apps` | 列出自定义抽取应用 | 列出当前用户创建的所有自定义文档抽取应用，返回每个应用的 ID、名称、描述、标签和输出字段定义。可用于查找 `execute_custom_extract_app` 所需的 `app_id`。 |
+| `list_custom_extract_apps` | 列出自定义抽取应用 | 自动读取当前用户创建的抽取应用全部分页，覆盖 1406/1423/1424/1425，包含未发布应用。`output_schema` 仅反映已发布配置，可为 null。 |
 | `execute_custom_extract_app` | 执行自定义抽取应用 | 使用指定的自定义文档抽取应用处理文件。需先通过 `list_custom_extract_apps` 获取可用的 `app_id`。 |
 
 **使用流程：** 先调用 `list_custom_extract_apps` 查看可用应用列表，获取目标应用的 `app_id`，再调用 `execute_custom_extract_app` 传入 `app_id` 与文件进行抽取。
 
 ---
+
+### 独立分类、自动路由与导出
+
+| 工具名 | 用途 |
+| --- | --- |
+| `list_classification_apps` | 显式筛选当前用户创建的 1426 分类应用，读取全部分页 |
+| `classify_document` | 使用分类应用返回文档实例类别和原始页码；默认同步，`wait=false` 创建异步任务 |
+| `query_classify_task` | 仅查询独立分类异步任务 |
+| `extract_routed_document` | 根据候选应用名称和描述分类，再逐文档实例抽取；默认同步，`wait=false` 创建异步任务 |
+| `query_routed_task` | 仅查询自动路由抽取异步任务 |
+| `export_workflow_runs` | 按用户明确要求导出工作流运行结果，返回临时下载链接；受限预览，无需管理员角色 |
+
+分类流程：先在 ADP 中配置 1426 分类应用，再调用 `list_classification_apps` 获取 `app_id`，传给 `classify_document`。路由流程：用 `list_custom_extract_apps` 选择 1425/1423/1424 候选应用，传入 `extract_routed_document.app_ids`，不另传分类应用 ID。
+
+分类和路由仅支持 PDF/PNG/JPEG，最大 100 MB、原文件最多 260 页；选择部分页也不改变原文件限额。`model_params.pages` 是从 1 开始且不重复的原始页码。路由一次 1–10 个不同应用 ID，应用名称去除首尾空白后也须不区分大小写唯一；同页允许匹配多个应用。
+
+```json
+{
+  "app_ids": ["your-1425-app", "your-1423-app"],
+  "file": "https://files.example.com/materials.pdf",
+  "file_name": "materials.pdf",
+  "wait": false,
+  "model_params": {
+    "pages": [1, 2],
+    "enable_highlight": true,
+    "enable_field_value_translation": false,
+    "enable_confidence": null
+  }
+}
+```
+
+三个临时开关在路由的 `model_params` 内，与 `pages` 同级，统一作用于所有子应用；省略/null 沿用各应用配置，false 明确关闭，不保存配置或生成版本。单应用抽取的三个开关放在顶层。
+
+分类返回 `segments`；路由返回 `extraction_result` 按应用分组，`object_values` 中每项为一份文档实例，页码始终引用原文件。失败实例保留 `error`，成功实例的结果继续返回；`partial_success` 和 `failed` 会标记 MCP `isError=true`，同时保留完整 `structuredContent` 和原始 `message`。全未分类仍可为 `success` 且结果为空。同步返回的 `task_id` 只用于关联，不表示创建了可异步查询的任务。
+
+导出仅访问当前账号在当前租户下有权访问、且属于指定 `application_id` 的运行，ID 本身不授予他人数据权限。
+
+| `report_mode` | `format` | 范围与结果 |
+| --- | --- | --- |
+| `merged`（默认） | excel/word/markdown/html/json | 合并文件；`run_ids` 省略/null/[] 选择当前用户符合条件的运行 |
+| `per_run` | excel/word/markdown/html/json | 每个运行一份文件，打包 ZIP；支持同样的范围筛选 |
+| `task_data` | excel/json | 恰好一个非空 `run_id`，导出已保存业务数据，不含附件 |
+| `task_package` | 必须显式指定 word/markdown/html | 恰好一个非空 `run_id`，报告与获准附件打包 ZIP |
+
+通用导出最多 200 个选中运行，默认只成功运行，可用 `include_failed_runs=true` 纳入其他运行；最多 500000 行。`node_ids`、`node_types`、`variable_filters`（支持输入变量点路径）、`primary_key_variable` 和 `max_text_length` 用于通用导出；后者默认 10000、范围 1–30000。任务模式不允许非空节点/节点类型/变量筛选，任务须已结束且保有可导出业务结果。`locale` 为 zh-CN/en-US，默认已保存展示语言，不重跑抽取或重译字段值；它和选择账号区域的 `accept_language` 不同。
+
+200 次上限针对参与导出的运行。选择所有符合条件的历史运行时，跳过记录统计 `skipped_runs` 及包含这些记录的 `total_runs` 可以超过 200，不代表实际导出了超过上限的运行。
+
+```json
+{"application_id":"your-workflow-app","run_ids":["your-run"],"report_mode":"task_package","format":"html","locale":"en-US"}
+```
+
+导出返回 `file_id`、`download_url`、`filename`、`file_size`、格式、模式、运行统计和摘要。链接有效期以部署为准。提交结果不明时不自动重发。
 
 ### 工作流应用
 
@@ -181,15 +234,17 @@ ADP MCP Server 以 **stdio** 方式运行，客户端通过 `npx` 拉起本地�
 | 工具名 | 标题 | 说明 |
 |--------|------|------|
 | `query_parse_task` | 查询文档解析异步任务 | 查询 `parse_document` 在 `wait=false` 时返回的 `task_id`，对应 `GET .../app/doc/recognize/query/task/{task_id}`。 |
-| `query_extract_task` | 查询文档抽取异步任务 | 查询 `extract_*` 或 `execute_custom_extract_app` 在 `wait=false` 时返回的 `task_id`，对应 `GET .../app/doc/extract/query/task/{task_id}`。 |
+| `query_extract_task` | 查询文档抽取异步任务 | 查询预置票据/卡证工具或 `execute_custom_extract_app` 的异步 `task_id`，对应 `GET .../app/doc/extract/query/task/{task_id}`；不用于路由任务。 |
+| `query_classify_task` | 查询文档分类异步任务 | 仅查询 `classify_document` 异步创建的 `task_id`，对应 `GET .../app/doc/classify/query/task/{task_id}`。 |
+| `query_routed_task` | 查询自动路由抽取异步任务 | 仅查询 `extract_routed_document` 异步创建的 `task_id`，对应 `GET .../app/doc/extract/routed/query/task/{task_id}`。 |
 
-两个工具都返回任务当前状态及已生成的结果；任务未完成时继续调用同一个查询工具。根据创建任务的工具选择查询入口，解析与抽取任务的 ID 不可混用，查询失败时也不切换类型。创建与查询应使用相同的账号区域。工作流的 `run_id` 使用 `query_workflow_run` 查询。
+四种查询都返回任务当前状态及已生成的结果；未完成时继续调用同一个查询工具。按创建任务的工具选择入口，ID 不可跨类型使用，查询失败也不切换类型。创建与查询应使用相同账号区域。工作流的 `run_id` 使用 `query_workflow_run` 查询。
 
-原 `query_task`、`get_result` 已替换为上述两个工具，升级后请刷新客户端工具列表。
+原 `query_task`、`get_result` 已替换为解析/单应用抽取查询，升级后请刷新客户端工具列表。
 
 ## 工具输入参数
 
-### query_parse_task / query_extract_task
+### query_parse_task / query_extract_task / query_classify_task / query_routed_task
 
 | 参数 | 类型 | 必填 | 说明 |
 |------|------|------|------|
@@ -204,7 +259,8 @@ ADP MCP Server 以 **stdio** 方式运行，客户端通过 `npx` 拉起本地�
 |------|------|------|------|
 | `file` | string | 是 | 文件 URL 或 Base64 编码内容 |
 | `file_name` | string | 否 | 文件名（含扩展名） |
-| `with_rec_result` | boolean | 否 | 是否包含 OCR 中间结果，默认 `true` |
+| `with_rec_result` | boolean | 否 | 是否返回文档解析结果，默认 `true`；高速自定义抽取不返回解析结果 |
+| `model_params` | object 或 null | 否 | 按能力使用 `pages`、`scale`、`keep_content`、`disable_collaboration`、`page_task_timeout_seconds`、`card_type`、`enable_multi_ticket` |
 | `wait` | boolean | 否 | 是否同步等待结果，默认 `true` |
 | `timeout_seconds` | integer | 否 | 同步等待超时秒数，默认 `300`，范围 1–900 |
 
@@ -220,6 +276,12 @@ ADP MCP Server 以 **stdio** 方式运行，客户端通过 `npx` 拉起本地�
 |------|------|------|------|
 | `enable_multi_ticket` | boolean | 否 | 是否将同一文件中的多张票据拆分为独立结果，默认 `true`；仅国际高速版和东南亚高速版生效，不修改应用配置 |
 | `enable_field_value_translation` | boolean 或 null | 否 | 仅为本次抽取开启（`true`）或关闭（`false`）字段值翻译；不传或 `null` 使用应用已保存配置，不修改应用配置；目标语言由 `accept_language` 或 `ADP_ACCEPT_LANGUAGE` 决定 |
+
+`extract_global_invoice_fast`、`extract_sea_invoice_fast` 和 `execute_custom_extract_app` 另支持顶层 `enable_highlight`、`enable_confidence`：true/false 仅覆盖本次，省略/null 沿用应用配置。字段翻译不覆盖原值，写入 `field_value_translation`；关闭置信度评估时返回的默认值不可当作评估分数。
+
+单应用 `model_params.pages` 没有分类/路由的 260 项限制。经典抽取、1425 和1423/1424 的原生 XLSX/Markdown 可用性以部署与授权为准，Base64 需正确 `file_name` 扩展名。Markdown 仅逻辑页 1。XLSX 的 `spreadsheet_billing` 和预览清单字段原样保留。1425 同步/异步始终禁用人机协同；`keep_content` 不会使其返回解析结果。`page_task_timeout_seconds` 是结果逐页整理等待时限，不是整次抽取超时。
+
+海外多票返回的 `tickets` 与 `invoice_tickets/receipt_tickets` 分组结果是同批数据的两种形式，选择一份消费，避免重复计数。新路由接口不重复返回 `tickets`。
 
 ### upload_temporary_file
 
@@ -243,7 +305,7 @@ ADP MCP Server 以 **stdio** 方式运行，客户端通过 `npx` 拉起本地�
 
 ### list_custom_extract_apps
 
-无需输入参数。
+可选 `ai_function` 为 1406/1423/1424/1425；省略时读取这些抽取能力的全部应用，不默认 1425。也可传 `accept_language`、`timeout_seconds`。查询固定 `app_type=1`、`owner_only=true`、`published_only=false` 并完整遍历分页，过滤其他能力后重算返回总数；`published_version_id` 是发布记录 ID，`output_schema` 仅反映已发布业务字段，可能为 null，未发布不等于不可调用。
 
 **文件传入方式：**
 
@@ -422,6 +484,8 @@ ADP MCP Server 以 **stdio** 方式运行，客户端通过 `npx` 拉起本地�
 
 ## 任务状态码
 
+以下数字状态用于旧解析/单应用抽取。独立分类使用 `pending/running/success/failed`；自动路由另有 `partial_success`，不可按数字状态轮询。接口原始状态和结果不被重写，失败或部分失败会附带 MCP `isError=true`。
+
 | 状态码 | MCP 状态 | 说明 |
 |--------|----------|------|
 | 0 | running | 未知 |
@@ -434,6 +498,8 @@ ADP MCP Server 以 **stdio** 方式运行，客户端通过 `npx` 拉起本地�
 ---
 
 ## 支持的文件格式
+
+下表按具体应用能力与部署版本适用；独立分类和自动路由严格限 PDF/PNG/JPEG。
 
 | 格式 | 扩展名 | 说明 |
 |------|--------|------|

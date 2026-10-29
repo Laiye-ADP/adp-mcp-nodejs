@@ -5,6 +5,8 @@ import {
   createWorkflowApplicationOutputSchema,
   customExtractInputSchema,
   emptyInputSchema,
+  extractInputSchema,
+  fastInvoiceInputSchema,
   fileInputSchema,
   overseasInvoiceInputSchema,
   taskInputSchema,
@@ -15,6 +17,7 @@ import {
   workflowRunOutputSchema,
   workflowTemplateListInputSchema
 } from "./schema.js";
+import { appListInputSchema, v119Operations } from "./v119-operations.js";
 
 interface PresetTool {
   name: string;
@@ -171,23 +174,23 @@ const presetTools: PresetTool[] = [
     name: "extract_global_invoice_fast",
     title: "海外发票/收据（高速模式）",
     description:
-      "从 PDF 或图片格式的海外发票、收据中高速提取关键字段（发票号、开票日期、金额、税额、币种、明细行等）。跳过 OCR 阶段，直接使用 VLM 提取，速度更快；适用于对延迟敏感的批量处理场景；中国大陆增值税发票请使用国内票据工具。",
+      "从海外发票、收据中高速提取发票号、日期、金额、税额、币种和明细行。适用于对延迟敏感的批量处理，可按次设置原文定位、翻译和置信度；中国大陆增值税发票请使用国内票据工具。",
     appId: "ootb_r3s6t9u2v5w8x1y4z7a0b3c6d9e2",
     labels: ["发票", "收据", "全球发票", "高准确度", "高速抽取"],
     mode: "extract",
-    inputSchema: overseasInvoiceInputSchema,
-    bodyFields: ["enable_multi_ticket", "enable_field_value_translation"]
+    inputSchema: fastInvoiceInputSchema,
+    bodyFields: ["enable_multi_ticket", "enable_field_value_translation", "enable_highlight", "enable_confidence"]
   },
   {
     name: "extract_sea_invoice_fast",
     title: "海外发票/收据（高速模式-东南亚版）",
     description:
-      "从 PDF 或图片格式的东南亚地区发票、收据中高速提取关键字段，支持 WHT（预扣税）等东南亚特有字段。跳过 OCR 阶段，直接使用 VLM 提取；适用于泰国、越南、印尼等东南亚国家的发票处理场景。",
+      "从东南亚发票、收据中高速提取关键字段，支持 WHT（预扣税）及行级预扣税字段，可按次设置原文定位、翻译和置信度。适用于泰国、越南、印尼等地区的发票处理。",
     appId: "ootb_u2v5w8x1y4z7a0b3c6d9e2f5g8",
     labels: ["发票", "收据", "票据", "东南亚发票", "高准确度", "高速抽取"],
     mode: "extract",
-    inputSchema: overseasInvoiceInputSchema,
-    bodyFields: ["enable_multi_ticket", "enable_field_value_translation"]
+    inputSchema: fastInvoiceInputSchema,
+    bodyFields: ["enable_multi_ticket", "enable_field_value_translation", "enable_highlight", "enable_confidence"]
   }
 ];
 
@@ -208,7 +211,8 @@ function createPresetOperation(preset: PresetTool): Operation {
       : "/open/agentic_doc_processor/{tenant_name}/v1/app/doc/extract/create/task",
     auth: "adp",
     bodyMode: "json",
-    inputSchema: preset.inputSchema ?? fileInputSchema,
+    inputSchema: preset.inputSchema ?? (isRecognize ? fileInputSchema : extractInputSchema),
+    validateInput: true,
     annotations: {
       title: preset.title,
       readOnlyHint: false,
@@ -221,13 +225,14 @@ function createPresetOperation(preset: PresetTool): Operation {
     },
     appId: preset.appId,
     mode: preset.mode,
-    bodyFields: preset.bodyFields,
+    bodyFields: ["file_name", "model_params", ...(isRecognize ? [] : ["card_type"]), ...(preset.bodyFields ?? [])],
     usesTenant: true,
     usesAcceptLanguage: true
   };
 }
 
 export const operations: Operation[] = [
+  ...v119Operations,
   ...presetTools.map(createPresetOperation),
   {
     name: "upload_temporary_file",
@@ -326,12 +331,15 @@ export const operations: Operation[] = [
     title: "列出自定义抽取应用",
     operationId: "listCustomExtractApps",
     description:
-      "列出当前用户创建的所有自定义文档抽取应用，返回每个应用的 ID、名称、描述、标签和输出字段定义。可用于查找 execute_custom_extract_app 所需的 app_id。",
+      "列出当前用户创建的自定义抽取及账号海外票据应用，自动读取全部分页，包含未发布应用。输出字段结构仅反映已发布抽取配置，可为 null；未发布不等于不可调用。分类应用请用 list_classification_apps。",
     method: "GET",
-    path: "/open/agentic_doc_processor/laiye/v1/app-list?app_type=0",
+    path: "/open/agentic_doc_processor/{tenant_name}/v1/app-list",
     auth: "adp",
     bodyMode: "none",
-    inputSchema: emptyInputSchema,
+    inputSchema: appListInputSchema,
+    validateInput: true,
+    usesTenant: true,
+    usesAcceptLanguage: true,
     annotations: {
       readOnlyHint: true
     }
@@ -347,6 +355,8 @@ export const operations: Operation[] = [
     auth: "adp",
     bodyMode: "json",
     inputSchema: customExtractInputSchema,
+    validateInput: true,
+    bodyFields: ["file_name", "model_params", "enable_highlight", "enable_field_value_translation", "enable_confidence", "enable_multi_ticket", "card_type"],
     annotations: {
       readOnlyHint: false
     },
@@ -359,7 +369,7 @@ export const operations: Operation[] = [
     name: "query_parse_task",
     title: "查询文档解析异步任务",
     operationId: "queryParseTask",
-    description: "使用 parse_document 在 wait=false 时返回的 task_id，查询文档解析异步任务的当前状态及已生成的解析结果。对应 recognize/query/task 接口。文档抽取任务请用 query_extract_task；工作流 run_id 请用 query_workflow_run。",
+    description: "只查询 parse_document 在 wait=false 时返回的 task_id，返回文档解析状态及可用解析结果。对应 recognize/query/task；单应用抽取用 query_extract_task，独立分类用 query_classify_task，自动路由用 query_routed_task，工作流用 query_workflow_run。",
     method: "GET",
     path: "/open/agentic_doc_processor/{tenant_name}/v1/app/doc/recognize/query/task/{task_id}",
     auth: "adp",
@@ -377,7 +387,7 @@ export const operations: Operation[] = [
     name: "query_extract_task",
     title: "查询文档抽取异步任务",
     operationId: "queryExtractTask",
-    description: "使用 extract_* 或 execute_custom_extract_app 在 wait=false 时返回的 task_id，查询文档抽取异步任务的当前状态及已生成的抽取结果。对应 extract/query/task 接口，适用于票据、卡证和自定义抽取。文档解析任务请用 query_parse_task；工作流 run_id 请用 query_workflow_run。",
+    description: "只查询预置票据/卡证工具或 execute_custom_extract_app 在 wait=false 时返回的 task_id，返回状态及可用抽取结果。对应 extract/query/task；自动路由 extract_routed_document 必须用 query_routed_task，独立分类用 query_classify_task，解析用 query_parse_task，工作流用 query_workflow_run。",
     method: "GET",
     path: "/open/agentic_doc_processor/{tenant_name}/v1/app/doc/extract/query/task/{task_id}",
     auth: "adp",

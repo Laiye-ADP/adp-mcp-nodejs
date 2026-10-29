@@ -1,5 +1,6 @@
 import type { JsonSchema } from "./types.js";
 import { workflowTemplateIds, workflowTemplateKeys } from "./workflow-templates.js";
+import { extractModelParamsSchema, resultSwitchProperties } from "./v119-operations.js";
 
 const documentFileProperties = {
   file: {
@@ -10,9 +11,10 @@ const documentFileProperties = {
     type: "string",
     description: "文件名（可选，含扩展名）"
   },
+  model_params: extractModelParamsSchema,
   with_rec_result: {
     type: "boolean",
-    description: "是否包含 OCR 中间结果",
+    description: "是否返回文档解析结果；高速自定义抽取不返回解析结果",
     default: true
   },
   wait: {
@@ -40,13 +42,18 @@ export const fileInputSchema: JsonSchema = {
   additionalProperties: false
 };
 
+export const extractInputSchema: JsonSchema = {
+  ...fileInputSchema,
+  properties: { ...documentFileProperties, card_type: { type: "string", description: "仅适用于支持卡证类型选择的抽取应用。" } }
+};
+
 export const overseasInvoiceInputSchema: JsonSchema = {
   type: "object",
   required: ["file"],
   properties: {
     ...documentFileProperties,
     enable_multi_ticket: {
-      type: "boolean",
+      type: ["boolean", "null"],
       description: "是否将同一文件中的多张票据拆分为独立结果。仅国际高速版和东南亚高速版生效；默认 true，仅影响本次调用，不修改应用配置。",
       default: true
     },
@@ -56,6 +63,11 @@ export const overseasInvoiceInputSchema: JsonSchema = {
     }
   },
   additionalProperties: false
+};
+
+export const fastInvoiceInputSchema: JsonSchema = {
+  ...overseasInvoiceInputSchema,
+  properties: { ...(overseasInvoiceInputSchema.properties as Record<string, unknown>), ...resultSwitchProperties }
 };
 
 export const chinaInvoiceInputSchema: JsonSchema = {
@@ -78,7 +90,7 @@ export const taskInputSchema: JsonSchema = {
     task_id: {
       type: "string",
       minLength: 1,
-      description: "对应类型的文档异步任务 ID：parse_document 返回的 ID 用 query_parse_task；extract_* 或 execute_custom_extract_app 返回的 ID 用 query_extract_task。"
+      description: "同类型异步任务 ID：parse_document 用 query_parse_task；票据/卡证/execute_custom_extract_app 用 query_extract_task；classify_document 用 query_classify_task；extract_routed_document 用 query_routed_task。"
     },
     accept_language: {
       type: "string",
@@ -181,6 +193,10 @@ export const customExtractInputSchema: JsonSchema = {
   type: "object",
   required: ["app_id", "file"],
   properties: {
+    model_params: extractModelParamsSchema,
+    ...resultSwitchProperties,
+    enable_multi_ticket: { type: ["boolean", "null"], description: "仅对支持多票处理的应用生效；省略/null 沿用接口默认行为。" },
+    card_type: { type: "string", description: "仅对支持卡证类型选择的应用生效。" },
     app_id: {
       type: "string",
       description: "自定义抽取应用 ID"
@@ -195,7 +211,7 @@ export const customExtractInputSchema: JsonSchema = {
     },
     with_rec_result: {
       type: "boolean",
-      description: "是否包含 OCR 中间结果",
+      description: "是否返回文档解析结果；高速自定义抽取不返回解析结果",
       default: true
     },
     wait: {

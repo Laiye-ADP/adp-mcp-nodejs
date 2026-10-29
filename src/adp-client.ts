@@ -5,6 +5,7 @@ import { AjvJsonSchemaValidator } from "@modelcontextprotocol/sdk/validation/ajv
 import type { JsonSchemaType } from "@modelcontextprotocol/sdk/validation/types.js";
 import type { AuthKind, JsonObject, Operation, RequestConfig } from "./types.js";
 import { workflowTemplateApplicationIds } from "./workflow-templates.js";
+import { validateExportResult } from "./v119-operations.js";
 
 const DOMESTIC_BASE_URL = "https://adp.laiye.com";
 const GLOBAL_BASE_URL = "https://adp-global.laiye.com";
@@ -41,6 +42,10 @@ export async function callAdpOperation(operation: Operation, args: JsonObject): 
     headers.set("accept-language", config.acceptLanguage);
   }
 
+  if (operation.name === "list_custom_extract_apps" || operation.name === "list_classification_apps") {
+    return listDocumentApplications(operation, args, config, headers);
+  }
+
   if (operation.bodyMode === "json") {
     headers.set("Content-Type", "application/json");
     return validateResponse(operation, args, await request(url, operation.method, headers, JSON.stringify(pickBody(args, operation)), getTimeoutMs(args)));
@@ -54,6 +59,10 @@ export async function callAdpOperation(operation: Operation, args: JsonObject): 
 }
 
 function validateResponse(operation: Operation, args: JsonObject, result: unknown): unknown {
+  // Preserve an explicit business rejection, including its code and message.
+  // Success-shape validation must not relabel a known rejection as uncertain acceptance.
+  if (result && typeof result === "object" && "code" in result && (result as JsonObject).code !== "success") return result;
+  if (operation.name === "export_workflow_runs") validateExportResult(args, result);
   if (operation.validateOutput && operation.outputSchema) {
     const validation = schemaValidator.getValidator(operation.outputSchema as JsonSchemaType)(result);
     if (!validation.valid) {
@@ -67,6 +76,49 @@ function validateResponse(operation: Operation, args: JsonObject, result: unknow
     }
   }
   return result;
+}
+
+async function listDocumentApplications(operation: Operation, args: JsonObject, config: RequestConfig, headers: Headers): Promise<unknown> {
+  const items: JsonObject[] = [];
+  const seen = new Set<string>();
+  const allowedFunctions = operation.name === "list_classification_apps" ? [1426]
+    : args.ai_function === undefined ? [1406, 1423, 1424, 1425] : [Number(args.ai_function)];
+  let offset = 0;
+  let first: JsonObject | undefined;
+  let total = 0;
+  while (true) {
+    const url = new URL(buildUrl(config.baseUrl, operation, args, config));
+    for (const [key, value] of Object.entries({ app_type: 1, owner_only: true, published_only: false,
+      with_output_schema: operation.name === "list_custom_extract_apps", offset, limit: 1000 })) url.searchParams.set(key, String(value));
+    url.searchParams.append("sort[]", "created_at");
+    url.searchParams.append("sort[]", "id");
+    const aiFunction = operation.name === "list_classification_apps" ? 1426 : args.ai_function;
+    if (aiFunction !== undefined) url.searchParams.set("ai_function", String(aiFunction));
+    const response = await request(url.toString(), "GET", headers, undefined, getTimeoutMs(args)) as JsonObject;
+    const data = response?.data as JsonObject | undefined;
+    const range = data?.range as JsonObject | undefined;
+    if (response?.code !== "success" || !Array.isArray(data?.list) || !Number.isInteger(range?.total) || Number(range?.total) < 0) {
+      throw new Error("ADP did not return a valid application list and range");
+    }
+    first ??= response;
+    total = Number(range!.total);
+    const page = data!.list as JsonObject[];
+    let added = 0;
+    for (const item of page) {
+      if (!item || typeof item.id !== "string" || !item.id) throw new Error("ADP returned an application without an id");
+      if (!seen.has(item.id)) {
+        seen.add(item.id);
+        added++;
+        // The unfiltered app-list can also contain parsing and workflow apps.
+        if (allowedFunctions.includes(Number(item.ai_function))) items.push(item);
+      }
+    }
+    offset += page.length;
+    if (offset >= total) break;
+    if (page.length === 0 || added === 0) throw new Error("ADP application pagination did not advance");
+  }
+  const firstData = first!.data as JsonObject;
+  return { ...first, data: { ...firstData, list: items, range: { ...(firstData.range as JsonObject), offset: 0, limit: items.length, total: items.length } } };
 }
 
 function buildHeaders(_auth: AuthKind, config: RequestConfig): Headers {
@@ -99,6 +151,7 @@ function buildUrl(
     if (value === undefined || value === null || value === "") {
       throw new Error(`Missing required path parameter: ${param}`);
     }
+    if (value === "." || value === "..") throw new Error(`Invalid path parameter: ${param}`);
     pathParams[param] = value;
   }
 

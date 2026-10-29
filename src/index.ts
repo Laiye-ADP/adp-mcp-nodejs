@@ -7,6 +7,7 @@ import { readFileSync } from "node:fs";
 import { callAdpOperation } from "./adp-client.js";
 import { operations } from "./operations.js";
 import type { JsonObject } from "./types.js";
+import { isFailedAdpResult } from "./v119-operations.js";
 
 const server = new Server(
   {
@@ -44,8 +45,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
   try {
     const result = await callAdpOperation(operation, (request.params.arguments ?? {}) as JsonObject);
+    const structured = toStructuredContent(result);
+    const businessRejection = structured?.code !== undefined && structured.code !== "success";
     return {
-      structuredContent: toStructuredContent(result),
+      ...(isFailedAdpResult(result) ? { isError: true } : {}),
+      structuredContent: businessRejection ? undefined : structured,
       content: [{ type: "text", text: JSON.stringify(result, null, 2) }]
     };
   } catch (error) {
