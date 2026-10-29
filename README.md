@@ -175,7 +175,25 @@ Workflow changes currently require the ADP website interface. Test and republish
 
 The workflow tools accept `accept_language` and `timeout_seconds`. Use the same account region for creation, upload, execution and query: `zh` selects the China service and `en` selects the global service, or configure `ADP_ACCEPT_LANGUAGE` consistently.
 
+### Async task queries
+
+| Tool Name | Title | Description |
+|-----------|-------|-------------|
+| `query_parse_task` | Query Async Document Parsing Task | Query the `task_id` returned by `parse_document` with `wait=false`, using `GET .../app/doc/recognize/query/task/{task_id}`. |
+| `query_extract_task` | Query Async Document Extraction Task | Query the `task_id` returned by `extract_*` or `execute_custom_extract_app` with `wait=false`, using `GET .../app/doc/extract/query/task/{task_id}`. |
+
+Both tools return the current task status and any available results. If processing is unfinished, query again with the same tool. Choose the query tool based on the tool that created the task; parsing and extraction IDs are not interchangeable, and a failed query does not switch task types. Use the same account region for creation and query. For a workflow `run_id`, use `query_workflow_run`.
+
+These tools replace `query_task` and `get_result`. Refresh your client's tool list after upgrading.
+
 ## Tool Input Parameters
+
+### query_parse_task / query_extract_task
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `task_id` | string | Yes | Task ID returned when creating an async task of the corresponding type |
+| `accept_language` | string | No | API region and response language matching task creation: `zh` or `en` |
 
 ### Document Parsing & OOTB Extraction Tools
 
@@ -235,7 +253,7 @@ No input parameters required.
 **Sync vs Async:**
 
 - `wait=true` (default): blocks until processing completes, returns the result directly
-- `wait=false`: returns immediately with a `task_id` for later status queries
+- `wait=false`: returns a `task_id` immediately; use `query_parse_task` for parsing or `query_extract_task` for extraction to query status and results
 
 ---
 

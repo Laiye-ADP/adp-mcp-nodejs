@@ -176,7 +176,25 @@ ADP MCP Server 以 **stdio** 方式运行，客户端通过 `npx` 拉起本地�
 
 工作流工具支持 `accept_language` 和 `timeout_seconds`。创建、上传、运行和查询须使用同一账号区域：`zh` 访问中国区，`en` 访问全球区，也可统一配置 `ADP_ACCEPT_LANGUAGE`。
 
+### 异步任务查询
+
+| 工具名 | 标题 | 说明 |
+|--------|------|------|
+| `query_parse_task` | 查询文档解析异步任务 | 查询 `parse_document` 在 `wait=false` 时返回的 `task_id`，对应 `GET .../app/doc/recognize/query/task/{task_id}`。 |
+| `query_extract_task` | 查询文档抽取异步任务 | 查询 `extract_*` 或 `execute_custom_extract_app` 在 `wait=false` 时返回的 `task_id`，对应 `GET .../app/doc/extract/query/task/{task_id}`。 |
+
+两个工具都返回任务当前状态及已生成的结果；任务未完成时继续调用同一个查询工具。根据创建任务的工具选择查询入口，解析与抽取任务的 ID 不可混用，查询失败时也不切换类型。创建与查询应使用相同的账号区域。工作流的 `run_id` 使用 `query_workflow_run` 查询。
+
+原 `query_task`、`get_result` 已替换为上述两个工具，升级后请刷新客户端工具列表。
+
 ## 工具输入参数
+
+### query_parse_task / query_extract_task
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `task_id` | string | 是 | 对应类型的异步任务创建响应返回的任务 ID |
+| `accept_language` | string | 否 | 与创建任务时一致的接口区域与返回语言，`zh` 或 `en` |
 
 ### 文档解析与 OOTB 抽取工具
 
@@ -236,7 +254,7 @@ ADP MCP Server 以 **stdio** 方式运行，客户端通过 `npx` 拉起本地�
 **同步 vs 异步：**
 
 - `wait=true`（默认）：阻塞等待处理完成，直接返回结果
-- `wait=false`：立即返回 `task_id`，后续可查询任务状态
+- `wait=false`：立即返回 `task_id`；解析任务用 `query_parse_task`，抽取任务用 `query_extract_task` 查询状态和结果
 
 ---
 

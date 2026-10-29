@@ -50,16 +50,7 @@ export async function callAdpOperation(operation: Operation, args: JsonObject): 
     return validateResponse(operation, args, await request(url, operation.method, headers, await buildMultipartBody(args, operation), getTimeoutMs(args)));
   }
 
-  try {
-    return validateResponse(operation, args, await request(url, operation.method, headers, undefined, getTimeoutMs(args)));
-  } catch (error) {
-    if (!operation.fallbackPath) {
-      throw error;
-    }
-
-    const fallbackUrl = buildUrl(config.baseUrl, operation, args, config, operation.fallbackPath);
-    return request(fallbackUrl, operation.method, headers, undefined, getTimeoutMs(args));
-  }
+  return validateResponse(operation, args, await request(url, operation.method, headers, undefined, getTimeoutMs(args)));
 }
 
 function validateResponse(operation: Operation, args: JsonObject, result: unknown): unknown {
@@ -94,11 +85,10 @@ function buildUrl(
   baseUrl: string,
   operation: Operation,
   args: JsonObject,
-  config: RequestConfig,
-  overridePath?: string
+  config: RequestConfig
 ): string {
   const pathParams: JsonObject = {};
-  const operationPath = overridePath ?? (shouldUseAsyncPath(operation, args) ? operation.asyncPath : operation.path);
+  const operationPath = shouldUseAsyncPath(operation, args) ? operation.asyncPath : operation.path;
 
   if (operation.usesTenant) {
     pathParams.tenant_name = config.tenantName;

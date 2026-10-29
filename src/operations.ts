@@ -356,16 +356,16 @@ export const operations: Operation[] = [
     usesAcceptLanguage: true
   },
   {
-    name: "query_task",
-    title: "查询任务状态",
-    operationId: "queryTask",
-    description: "查询文档处理任务的当前状态",
+    name: "query_parse_task",
+    title: "查询文档解析异步任务",
+    operationId: "queryParseTask",
+    description: "使用 parse_document 在 wait=false 时返回的 task_id，查询文档解析异步任务的当前状态及已生成的解析结果。对应 recognize/query/task 接口。文档抽取任务请用 query_extract_task；工作流 run_id 请用 query_workflow_run。",
     method: "GET",
-    path: "/open/agentic_doc_processor/{tenant_name}/v1/app/doc/extract/query/task/{task_id}",
-    fallbackPath: "/open/agentic_doc_processor/{tenant_name}/v1/app/doc/recognize/query/task/{task_id}",
+    path: "/open/agentic_doc_processor/{tenant_name}/v1/app/doc/recognize/query/task/{task_id}",
     auth: "adp",
     bodyMode: "none",
     inputSchema: taskInputSchema,
+    validateInput: true,
     annotations: {
       readOnlyHint: true
     },
@@ -374,16 +374,16 @@ export const operations: Operation[] = [
     pathParams: ["task_id"]
   },
   {
-    name: "get_result",
-    title: "获取任务结果",
-    operationId: "getResult",
-    description: "获取已完成的文档处理任务的完整结果",
+    name: "query_extract_task",
+    title: "查询文档抽取异步任务",
+    operationId: "queryExtractTask",
+    description: "使用 extract_* 或 execute_custom_extract_app 在 wait=false 时返回的 task_id，查询文档抽取异步任务的当前状态及已生成的抽取结果。对应 extract/query/task 接口，适用于票据、卡证和自定义抽取。文档解析任务请用 query_parse_task；工作流 run_id 请用 query_workflow_run。",
     method: "GET",
     path: "/open/agentic_doc_processor/{tenant_name}/v1/app/doc/extract/query/task/{task_id}",
-    fallbackPath: "/open/agentic_doc_processor/{tenant_name}/v1/app/doc/recognize/query/task/{task_id}",
     auth: "adp",
     bodyMode: "none",
     inputSchema: taskInputSchema,
+    validateInput: true,
     annotations: {
       readOnlyHint: true
     },

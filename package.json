@@ -16,7 +16,7 @@
     "dev": "tsx src/index.ts",
     "start": "node dist/index.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "npm run build && node --test test/workflows.test.mjs"
+    "test": "npm run build && node --test test/workflows.test.mjs test/document-tasks.test.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0"

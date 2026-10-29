@@ -16,7 +16,6 @@ export interface Operation {
   method: HttpMethod;
   path: string;
   asyncPath?: string;
-  fallbackPath?: string;
   auth: AuthKind;
   bodyMode: BodyMode;
   inputSchema: JsonSchema;

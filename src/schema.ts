@@ -77,7 +77,8 @@ export const taskInputSchema: JsonSchema = {
   properties: {
     task_id: {
       type: "string",
-      description: "任务 ID"
+      minLength: 1,
+      description: "对应类型的文档异步任务 ID：parse_document 返回的 ID 用 query_parse_task；extract_* 或 execute_custom_extract_app 返回的 ID 用 query_extract_task。"
     },
     accept_language: {
       type: "string",
