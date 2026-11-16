@@ -1,75 +1,45 @@
 #!/usr/bin/env node
 
+import { readFileSync } from "node:fs";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
-import { readFileSync } from "node:fs";
-import { callAdpOperation } from "./adp-client.js";
-import { operations } from "./operations.js";
-import type { JsonObject } from "./types.js";
-import { isFailedAdpResult } from "./v119-operations.js";
+import { AdpClient, type RegionCache } from "./adp-client.js";
+import { callTool, failureResult, tools } from "./tools.js";
 
+const { version } = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as {
+  version: string;
+};
 const server = new Server(
+  { name: "laiye-adp-mcp-nodejs-v2", version },
   {
-    name: "laiye-adp-mcp-nodejs",
-    version: JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).version
-  },
-  {
-    capabilities: {
-      tools: {}
-    }
+    capabilities: { tools: {} },
+    instructions: "Use get_adp_guide for preset IDs and workflow examples. Follow next_steps when available, and use the original task_ref to continue a pending task."
   }
 );
 
-server.setRequestHandler(ListToolsRequestSchema, async () => ({
-  tools: operations.map((operation) => ({
-    name: operation.name,
-    title: operation.title,
-    description: operation.description,
-    inputSchema: operation.inputSchema,
-    outputSchema: operation.outputSchema,
-    annotations: operation.annotations,
-    _meta: operation.metadata
-  }))
-}));
-
-server.setRequestHandler(CallToolRequestSchema, async (request) => {
-  const operation = operations.find((candidate) => candidate.name === request.params.name);
-
-  if (!operation) {
-    return {
-      isError: true,
-      content: [{ type: "text", text: `Unknown tool: ${request.params.name}` }]
-    };
-  }
-
-  try {
-    const result = await callAdpOperation(operation, (request.params.arguments ?? {}) as JsonObject);
-    const structured = toStructuredContent(result);
-    const businessRejection = structured?.code !== undefined && structured.code !== "success";
-    return {
-      ...(isFailedAdpResult(result) ? { isError: true } : {}),
-      structuredContent: businessRejection ? undefined : structured,
-      content: [{ type: "text", text: JSON.stringify(result, null, 2) }]
-    };
-  } catch (error) {
-    return {
-      isError: true,
-      content: [{ type: "text", text: error instanceof Error ? error.message : String(error) }]
-    };
-  }
+const regions: RegionCache = new Map();
+server.setRequestHandler(ListToolsRequestSchema, async (_request, { signal }) => {
+  const region = await new AdpClient(process.env, regions).getCatalogRegion(signal);
+  return { tools: tools[region] };
 });
 
-async function main(): Promise<void> {
-  const transport = new StdioServerTransport();
-  await server.connect(transport);
-}
-
-main().catch((error) => {
-  console.error(error);
-  process.exit(1);
+server.setRequestHandler(CallToolRequestSchema, async ({ params }, { signal }) => {
+  const result = await callTool(params.name, params.arguments ?? {}, new AdpClient(process.env, regions), version, signal)
+    .catch((error: unknown) => failureResult(error));
+  return {
+    ...(result.status === "failed" ? { isError: true } : {}),
+    structuredContent: result,
+    content: [{
+      type: "text",
+      text: typeof result.markdown === "string" ? result.markdown : JSON.stringify(result)
+    }]
+  };
 });
 
-function toStructuredContent(result: unknown): JsonObject | undefined {
-  return result !== null && typeof result === "object" && !Array.isArray(result) ? (result as JsonObject) : undefined;
+try {
+  await server.connect(new StdioServerTransport());
+} catch {
+  console.error("Unable to start the Laiye ADP MCP server.");
+  process.exitCode = 1;
 }
