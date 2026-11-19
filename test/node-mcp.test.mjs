@@ -91,8 +91,8 @@ test("stdio registers the nine Node tools and delivers the guide without a key",
   }, "", { USERPROFILE: profile.profileDir });
   const { tools } = await client.listTools();
   assert.deepEqual(tools.map(tool => tool.name).sort(), [
-    "extract_custom_document", "extract_document", "get_adp_guide", "get_task",
-    "parse_document", "route_document", "run_workflow", "submit_user_feedback", "upload_temporary_file"
+    "extract_custom_document", "extract_document", "get_adp_guide", "parse_document",
+    "route_document", "run_workflow", "submit_user_feedback", "task", "upload_temporary_file"
   ]);
   assert.ok(tools.every(tool => tool.description && tool.outputSchema?.type === "object"));
   const inputs = Object.fromEntries(tools.map(tool => [tool.name, tool.inputSchema]));
@@ -118,9 +118,16 @@ test("stdio registers the nine Node tools and delivers the guide without a key",
   }
   assert.deepEqual([...inputs.run_workflow.required].sort(), ["files", "template_key"]);
   assert.equal(inputs.run_workflow.properties.inputs, undefined);
-  assert.equal(tools.find(tool => tool.name === "get_task").annotations.readOnlyHint, true);
+  assert.deepEqual(inputs.task.required, []);
+  assert.equal(inputs.task.oneOf, undefined);
+  assert.equal(inputs.task.anyOf, undefined);
+  assert.deepEqual(inputs.task.properties.action.enum, ["query", "cancel"]);
+  assert.equal(inputs.task.properties.action.default, "query");
+  assert.deepEqual(inputs.task.properties.task_type.enum, ["parse", "extract", "classify"]);
+  assert.equal(tools.find(tool => tool.name === "task").annotations.readOnlyHint, false);
+  assert.equal(tools.find(tool => tool.name === "task").annotations.destructiveHint, true);
   assert.equal(tools.find(tool => tool.name === "run_workflow").annotations.idempotentHint, false);
-  const taskOutput = new AjvJsonSchemaValidator().getValidator(tools.find(tool => tool.name === "get_task").outputSchema);
+  const taskOutput = new AjvJsonSchemaValidator().getValidator(tools.find(tool => tool.name === "task").outputSchema);
   const result = { status: "succeeded", task_ref: { kind: "parse", id: "parse-1" },
     data: { task_id: "parse-1", response_type: "recognize", status: 4 } };
   assert.equal(taskOutput(result).valid, true);
@@ -182,15 +189,15 @@ test("parse waits on its original task and extraction can be queried later with 
   assert.equal(calls[0].body.app_id, "ootb_k7m2x9p4v1n8w3q6r5t0y2b4");
   const submitted = (await call(client, "extract_document", { app_id: domesticBill, file_url: fileUrl, wait: false })).structuredContent;
   assert.deepEqual(submitted.task_ref, { kind: "extract", id: "extract-1" });
-  const nextQuery = submitted.next_steps.find(step => step.tool === "get_task");
+  const nextQuery = submitted.next_steps.find(step => step.tool === "task");
   assert.deepEqual(nextQuery.arguments, { task_ref: submitted.task_ref });
   assert.equal(calls.length, 3);
-  const queried = (await call(client, "get_task", { task_ref: submitted.task_ref })).structuredContent;
+  const queried = (await call(client, "task", { task_ref: submitted.task_ref })).structuredContent;
   assert.equal(queried.status, "succeeded");
   assert.deepEqual(queried.usage, {
     ...recordedUsage, credits_consumed: 1.3, billing_breakdown: { extraction: 0.8, collaboration: 0.5 }
   });
-  const pageOnly = (await call(client, "get_task", { task_ref: { kind: "extract", id: "extract-pages-only" } })).structuredContent;
+  const pageOnly = (await call(client, "task", { task_ref: { kind: "extract", id: "extract-pages-only" } })).structuredContent;
   assert.deepEqual(pageOnly.usage, { num_pages: 1 });
   assert.equal(pageOnly.usage_status, "unavailable");
   assert.ok(calls.every(item => item.key === "test-key"));
@@ -389,7 +396,7 @@ test("workflow polling and direct task queries return the model usage billing br
   const run = (await call(client, "run_workflow", {
     template_key: "finance_payable", files: [{ url: fileUrl }]
   })).structuredContent;
-  const queried = (await call(client, "get_task", { task_ref: run.task_ref })).structuredContent;
+  const queried = (await call(client, "task", { task_ref: run.task_ref })).structuredContent;
   for (const result of [run, queried]) {
     assert.equal(result.status, "succeeded");
     assert.equal(result.usage_status, "available");
@@ -404,7 +411,7 @@ test("wait timeout keeps the accepted task reference without submitting again", 
   const result = (await call(client, "parse_document", { file_url: fileUrl, wait_timeout_seconds: 1 })).structuredContent;
   assert.equal(result.status, "pending");
   assert.deepEqual(result.task_ref, { kind: "parse", id: "parse-long" });
-  assert.deepEqual(result.next_steps.find(step => step.tool === "get_task").arguments, { task_ref: result.task_ref });
+  assert.deepEqual(result.next_steps.find(step => step.tool === "task").arguments, { task_ref: result.task_ref });
   assert.equal(calls.filter(item => item.method === "POST").length, 1);
   assert.ok(calls.filter(item => item.method === "GET").every(item => item.path.endsWith("/parse-long")));
 });
@@ -720,7 +727,7 @@ test("documented API errors keep their stable code, HTTP status and repair guida
     error: { code: "TASK_NOT_AVAILABLE", retryable: false, fix }
   }));
   const ref = { kind: "extract", id: "absent" };
-  const reply = await call(client, "get_task", { task_ref: ref });
+  const reply = await call(client, "task", { task_ref: ref });
   assert.equal(reply.isError, true);
   assert.deepEqual(reply.structuredContent.task_ref, ref);
   const error = reply.structuredContent.error;
@@ -731,6 +738,140 @@ test("documented API errors keep their stable code, HTTP status and repair guida
   assert.equal(error.fix, fix);
   assert.doesNotMatch(reply.content[0].text, /Synthetic upstream diagnostics/);
   assert.equal(calls.length, 1);
+});
+
+test("task resolves each identifier form and rejects mixed or incomplete forms before requesting", async t => {
+  const { client, calls } = await connect(t, ({ path }) => {
+    if (path.startsWith(`${workflowPrefix}/v1/app/run/query/task/`)) {
+      return { ...ok({ run_id: "run-query", status: "succeeded", output: {} }), usage: { credits_consumed: 1.2 } };
+    }
+    const id = path.split("/").at(-1);
+    return { ...ok({ task_id: id, status: path.includes("/classify/") ? "success" : 4 }), usage: recordedUsage };
+  });
+  for (const [args, ref, path] of [
+    [{ task_ref: { kind: "parse", id: "parse-query" } }, { kind: "parse", id: "parse-query" }, `${documentPrefix}/recognize/query/task/parse-query`],
+    [{ action: "query", task_id: "extract-query", task_type: "extract" }, { kind: "extract", id: "extract-query" }, `${documentPrefix}/extract/query/task/extract-query`],
+    [{ task_id: "classify-query", task_type: "classify" }, { kind: "classify", id: "classify-query" }, `${documentPrefix}/classify/query/task/classify-query`],
+    [{ run_id: "run-query" }, { kind: "workflow", id: "run-query" }, `${workflowPrefix}/v1/app/run/query/task/run-query`]
+  ]) {
+    const reply = await call(client, "task", args);
+    assert.notEqual(reply.isError, true);
+    assert.equal(reply.structuredContent.action, "query");
+    assert.equal(reply.structuredContent.status, "succeeded");
+    assert.deepEqual(reply.structuredContent.task_ref, ref);
+    assert.equal(calls.at(-1).path, path);
+    assert.equal(calls.at(-1).method, "GET");
+    assert.ok(reply.structuredContent.usage.credits_consumed > 0);
+  }
+  for (const args of [
+    {}, { task_id: "extract-query" }, { task_type: "extract" },
+    { task_ref: { kind: "parse", id: "parse-query" }, run_id: "run-query" },
+    { task_ref: { kind: "parse", id: "parse-query" }, task_type: "parse" },
+    { run_id: "run-query", task_id: "extract-query", task_type: "extract" },
+    { run_id: "run-query", task_type: "parse" },
+    { task_id: "extract-query", task_type: "workflow" },
+    { run_id: "../run-query" }, { task_ref: { kind: "parse", id: "bad/id" } },
+    { run_id: "run-query", reason: "Query cannot cancel" },
+    { action: "cancel", task_id: "parse-query", task_type: "parse", reason: "Document reason is unsupported" }
+  ]) {
+    const reply = await call(client, "task", args);
+    assert.equal(reply.isError, true, JSON.stringify(args));
+    assert.equal(reply.structuredContent.status, "failed");
+  }
+  assert.equal(calls.length, 4);
+});
+
+test("task cancellation preserves actual states, is idempotent, and sends each POST only once", async t => {
+  const { client, calls } = await connect(t, ({ path }) => {
+    const task_id = path.split("/").at(-1);
+    const status = task_id === "doc-running" ? "running" : task_id === "doc-succeeded" ? "succeeded"
+      : task_id === "doc-failed" ? "failed" : "cancelled";
+    return ok({ task_id, status, cancelled: status === "cancelled", already_cancelled: task_id === "doc-repeat" });
+  });
+  for (const [task_type, route] of [["parse", "recognize"], ["extract", "extract"], ["classify", "classify"]]) {
+    const reply = await call(client, "task", { action: "cancel", task_id: `doc-${task_type}`, task_type });
+    assert.notEqual(reply.isError, true);
+    assert.deepEqual(reply.structuredContent, {
+      status: "succeeded", action: "cancel", task_ref: { kind: task_type, id: `doc-${task_type}` },
+      data: { task_id: `doc-${task_type}`, status: "cancelled", cancelled: true, already_cancelled: false }
+    });
+    assert.equal(calls.at(-1).path, `${documentPrefix}/${route}/cancel/task/doc-${task_type}`);
+    assert.equal(calls.at(-1).body, "");
+  }
+  const repeat = await call(client, "task", { action: "cancel", task_ref: { kind: "parse", id: "doc-repeat" } });
+  assert.notEqual(repeat.isError, true);
+  assert.equal(repeat.structuredContent.data.already_cancelled, true);
+  for (const status of ["running", "succeeded", "failed"]) {
+    const ref = { kind: "extract", id: `doc-${status}` };
+    const reply = await call(client, "task", { action: "cancel", task_ref: ref });
+    assert.equal(reply.isError, true);
+    assert.equal(reply.structuredContent.status, "failed");
+    assert.equal(reply.structuredContent.data.status, status);
+    assert.equal(reply.structuredContent.error.code, "TASK_NOT_CANCELLABLE");
+    assert.deepEqual(reply.structuredContent.task_ref, ref);
+    assert.deepEqual(reply.structuredContent.next_steps[0].arguments, { task_ref: ref });
+    assert.equal(reply.structuredContent.next_steps[0].tool, "task");
+    assert.equal(reply.structuredContent.usage, undefined);
+  }
+  for (const args of [{ run_id: "run-unsupported" }, { task_ref: { kind: "workflow", id: "run-unsupported" } }]) {
+    const workflow = await call(client, "task", { action: "cancel", ...args });
+    assert.equal(workflow.isError, true);
+    assert.equal(workflow.structuredContent.error.code, "TASK_CANCELLATION_UNSUPPORTED");
+    assert.deepEqual(workflow.structuredContent.task_ref, { kind: "workflow", id: "run-unsupported" });
+    assert.deepEqual(workflow.structuredContent.next_steps[0].arguments, { task_ref: workflow.structuredContent.task_ref });
+    assert.equal(workflow.structuredContent.next_steps[0].tool, "task");
+    assert.equal(workflow.structuredContent.data, undefined);
+  }
+  assert.equal(calls.length, 7);
+  assert.ok(calls.every(({ method }) => method === "POST"));
+});
+
+test("task queries cancelled tasks without a tool error and keeps available recorded usage", async t => {
+  const { client, calls } = await connect(t, ({ method, path }) => {
+    if (method === "POST") return ok({ task_id: "cancelled" });
+    if (path.includes("/run/")) return { ...ok({ run_id: "cancelled", status: "cancelled" }), usage: { credits_consumed: 0.5 } };
+    return { ...ok({ task_id: "cancelled", status: path.includes("/classify/") ? "cancelled" : 6 }), usage: recordedUsage };
+  });
+  for (const kind of ["parse", "extract", "classify", "workflow"]) {
+    const reply = await call(client, "task", { task_ref: { kind, id: "cancelled" } });
+    assert.notEqual(reply.isError, true);
+    assert.equal(reply.structuredContent.status, "cancelled");
+    assert.equal(reply.structuredContent.error, undefined);
+    assert.equal(reply.structuredContent.usage_status, "available");
+    assert.ok(reply.structuredContent.usage.credits_consumed > 0);
+  }
+  const parsed = await call(client, "parse_document", { files: [{ url: fileUrl }] });
+  assert.notEqual(parsed.isError, true);
+  assert.equal(parsed.structuredContent.status, "cancelled");
+  assert.equal(parsed.structuredContent.files[0].status, "cancelled");
+  assert.equal(parsed.structuredContent.files[0].error, undefined);
+  assert.equal(calls.length, 6);
+});
+
+test("task treats malformed cancellation receipts as unconfirmed and never repeats the cancellation", async t => {
+  const { client, calls } = await connect(t, ({ path }) => {
+    const id = path.split("/").at(-1);
+    const base = { task_id: id, status: "cancelled", cancelled: true, already_cancelled: false };
+    if (id === "wrong-id") return ok({ ...base, task_id: "other" });
+    if (id === "missing-data") return ok(null);
+    if (id === "missing-boolean") return ok({ task_id: id, status: "cancelled" });
+    if (id === "inconsistent") return ok({ ...base, cancelled: false });
+    if (id === "inconsistent-repeat") return ok({ ...base, status: "running", cancelled: false, already_cancelled: true });
+    return ok({ ...base, status: "unknown" });
+  });
+  const ids = ["wrong-id", "missing-data", "missing-boolean", "inconsistent", "inconsistent-repeat", "unknown"];
+  for (const id of ids) {
+    const ref = { kind: "parse", id };
+    const reply = await call(client, "task", { action: "cancel", task_ref: ref });
+    assert.equal(reply.isError, true);
+    assert.equal(reply.structuredContent.error.acceptance_unknown, true);
+    assert.equal(reply.structuredContent.error.retryable, false);
+    assert.deepEqual(reply.structuredContent.task_ref, ref);
+    assert.equal(reply.structuredContent.usage, undefined);
+    assert.equal(reply.structuredContent.next_steps[0].tool, undefined);
+  }
+  assert.equal(calls.length, ids.length);
+  assert.ok(calls.every(({ method }) => method === "POST"));
 });
 
 test("wait polling honors Retry-After while a rejected submission stays a single POST", async t => {
@@ -765,7 +906,7 @@ test("Retry-After beyond the waiting budget returns the original reference", asy
   assert.equal(result.status, "pending");
   assert.deepEqual(result.task_ref, { kind: "parse", id: "parse-deferred" });
   assert.equal(result.query_error.retry_after_ms, 20_000);
-  const next = result.next_steps.find(step => step.tool === "get_task");
+  const next = result.next_steps.find(step => step.tool === "task");
   assert.deepEqual(next.arguments, { task_ref: result.task_ref });
   assert.match(next.message, /等待至少 20 秒/);
   assert.deepEqual(calls.map(item => item.method), ["POST", "GET"]);
@@ -837,26 +978,26 @@ test("stdio automatically reuses CLI credentials and picks up changes between ca
   const task_ref = { kind: "parse", id: "parse-1" };
   const guide = await call(client, "get_adp_guide");
   assert.equal(guide.structuredContent.status, "succeeded");
-  const missing = await call(client, "get_task", { task_ref });
+  const missing = await call(client, "task", { task_ref });
   assert.equal(missing.structuredContent.error.code, "MISSING_API_KEY");
   assert.match(missing.structuredContent.error.message, /adp\.laiye\.com\?from=getkey&utm_source=github/);
   assert.equal(calls.length, 0);
 
   await writeFile(profile.configFile, JSON.stringify({ api_base_url: baseUrl, tenant_name: "cli-tenant" }));
-  const incomplete = await call(client, "get_task", { task_ref });
+  const incomplete = await call(client, "task", { task_ref });
   assert.equal(incomplete.structuredContent.error.code, "MISSING_API_KEY");
   assert.equal(calls.length, 0);
 
   const config = await profile.write("synthetic-cli-key-one", baseUrl, "cli-tenant");
   const keyBytes = await readFile(profile.keyFile);
-  const result = await call(client, "get_task", { task_ref });
+  const result = await call(client, "task", { task_ref });
   assert.equal(result.structuredContent.status, "succeeded");
   assert.equal(calls[0].key, "synthetic-cli-key-one");
   assert.equal(await readFile(profile.configFile, "utf8"), config);
   assert.deepEqual(await readFile(profile.keyFile), keyBytes);
 
   await profile.write("synthetic-cli-key-two", baseUrl, "cli-tenant");
-  const rotated = await call(client, "get_task", { task_ref });
+  const rotated = await call(client, "task", { task_ref });
   assert.equal(rotated.structuredContent.status, "succeeded");
   assert.equal(calls[1].key, "synthetic-cli-key-two");
   assert.doesNotMatch(JSON.stringify(rotated), /synthetic-cli-key/);
@@ -865,7 +1006,7 @@ test("stdio automatically reuses CLI credentials and picks up changes between ca
   const lastByte = Number.parseInt(corrupted.api_key.slice(-2), 16);
   corrupted.api_key = corrupted.api_key.slice(0, -2) + (lastByte ^ 1).toString(16).padStart(2, "0");
   await writeFile(profile.configFile, JSON.stringify(corrupted));
-  const invalid = await call(client, "get_task", { task_ref });
+  const invalid = await call(client, "task", { task_ref });
   assert.equal(invalid.structuredContent.error.code, "CLI_CREDENTIALS_UNAVAILABLE");
   assert.doesNotMatch(JSON.stringify(invalid), /synthetic-cli-key/);
   assert.equal(calls.length, 2);

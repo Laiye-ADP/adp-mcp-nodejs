@@ -9,7 +9,7 @@ import { resultSchemas } from "./result-schema.js";
 type TaskKind = "parse" | "extract" | "classify" | "workflow";
 type TaskRef = { kind: TaskKind; id: string };
 type FileReference = { url: string; name?: string; mime_type?: string };
-type ResultStatus = "pending" | "succeeded" | "failed" | "partial_success";
+type ResultStatus = "pending" | "succeeded" | "failed" | "cancelled" | "partial_success";
 type ScheduleRequest = <T>(request: () => Promise<T>) => Promise<T>;
 type WaitStatus = "paused" | "timeout" | "query_failed";
 type Schema = JsonSchemaType;
@@ -50,7 +50,7 @@ const workflowFile = objectSchema({
   mime_type: { ...requiredText, description: "使用上传回执的 content_type。能从文件名推断时可省略。" }
 }, ["url"]);
 const waitProperties: Record<string, Schema> = {
-  wait: { type: "boolean", default: true, description: "默认等待；false 在提交完成后立即返回任务引用，随后用 get_task 查询。" },
+  wait: { type: "boolean", default: true, description: "默认等待；false 在提交完成后立即返回任务引用，随后用 task 查询。" },
   wait_timeout_seconds: { type: "integer", minimum: 1, maximum: 900, default: defaultWaitSeconds,
     description: "等待结果的最长秒数。超时后返回原任务引用。" }
 };
@@ -148,11 +148,17 @@ function buildTools(region: AdpRegion) {
       outputSchema: output.route_document
     },
     {
-      name: "get_task", title: "查询异步任务",
-      description: "原样传入业务工具返回的 task_ref，查询原任务的状态、可用结果和用量。适用于 wait=false 提交后或等待超时后的续查。",
-      inputSchema: objectSchema({ task_ref: taskReference }, ["task_ref"]),
-      annotations: { ...readOnly, openWorldHint: true },
-      outputSchema: output.get_task
+      name: "task", title: "任务管理",
+      description: "查询异步任务的状态、可用结果和用量，或取消任务。传入 task_ref、run_id 或 task_id 与 task_type 中的一种。action 默认为 query。仅取消尚未被领取的待执行文档任务，工作流支持查询。",
+      inputSchema: objectSchema({
+        action: { type: "string", enum: ["query", "cancel"], default: "query", description: "query 查询状态、结果和用量；cancel 尝试取消尚未被领取的待执行文档任务。工作流仅支持 query，不重新提交任务。" },
+        task_ref: { ...taskReference, description: "业务工具返回的完整任务引用。与 run_id、task_id、task_type 互斥。" },
+        run_id: { ...requiredText, maxLength: 128, pattern: "^[A-Za-z0-9_-]+$", description: "工作流运行 ID。与 task_ref、task_id、task_type 互斥。" },
+        task_id: { ...requiredText, maxLength: 128, pattern: "^[A-Za-z0-9_-]+$", description: "文档任务 ID，必须同时提供 task_type。与 task_ref、run_id 互斥。" },
+        task_type: { type: "string", enum: ["parse", "extract", "classify"], description: "task_id 对应的文档任务类型：parse 解析、extract 抽取、classify 分类。" }
+      }),
+      annotations: { readOnlyHint: false, idempotentHint: true, destructiveHint: true, openWorldHint: true },
+      outputSchema: output.task
     },
     {
       name: "submit_user_feedback", title: "提交用户反馈",
@@ -249,8 +255,12 @@ export async function callTool(
       };
     case "upload_temporary_file":
       return uploadFiles(args, client, signal);
-    case "get_task":
-      return queryExistingTask(args.task_ref as TaskRef, client, signal);
+    case "task": {
+      const ref = resolveTaskReference(args);
+      return args.action === "cancel"
+        ? cancelExistingTask(ref, client, signal)
+        : { ...await queryExistingTask(ref, client, signal), action: "query" };
+    }
     case "submit_user_feedback": {
       const attachmentPaths = (args.attachment_paths as string[] | undefined) ?? [];
       if (attachmentPaths.length && args.attachments_authorized !== true) {
@@ -457,6 +467,7 @@ function batchResult(files: JsonObject[]): JsonObject {
   if (statuses.includes("pending")) status = "pending";
   else if (statuses.every((item) => item === "succeeded")) status = "succeeded";
   else if (statuses.every((item) => item === "failed")) status = "failed";
+  else if (statuses.every((item) => item === "cancelled")) status = "cancelled";
   return { status, files };
 }
 
@@ -584,6 +595,61 @@ async function queryExistingTask(ref: TaskRef, client: AdpClient, signal?: Abort
   }
 }
 
+function resolveTaskReference(args: JsonObject): TaskRef {
+  const hasRef = args.task_ref !== undefined;
+  const hasRun = args.run_id !== undefined;
+  const hasDocument = args.task_id !== undefined || args.task_type !== undefined;
+  if (Number(hasRef) + Number(hasRun) + Number(hasDocument) !== 1) {
+    throw new Error("任务标识只能选择一种：task_ref、run_id，或 task_id 与 task_type。");
+  }
+  if (hasRef) return args.task_ref as TaskRef;
+  if (hasRun) return { kind: "workflow", id: args.run_id as string };
+  if (args.task_id === undefined || args.task_type === undefined) {
+    throw new Error("文档任务必须同时提供 task_id 和 task_type。");
+  }
+  return { kind: args.task_type as TaskKind, id: args.task_id as string };
+}
+
+async function cancelExistingTask(ref: TaskRef, client: AdpClient, signal?: AbortSignal): Promise<JsonObject> {
+  if (ref.kind === "workflow") {
+    return {
+      ...failureResult(new AdpApiError("工作流仅支持查询，暂不支持通过此工具取消。", {
+        code: "TASK_CANCELLATION_UNSUPPORTED", retryable: false
+      })), action: "cancel", task_ref: ref,
+      next_steps: [taskStep(ref, "查询原工作流的实际状态与可用结果。")]
+    };
+  }
+  try {
+    const envelope = await client.request(taskPath(ref.kind, `/cancel/task/${ref.id}`, client), { method: "POST", signal });
+    const data = envelope.data;
+    if (!isObject(data)) throw unknownReceipt("取消接口未返回任务数据。请查询原任务确认状态。");
+    if (data[taskActions[ref.kind].idKey] !== ref.id) throw unknownReceipt("取消响应中的任务 ID 与原任务不一致。请查询原任务确认状态。");
+    const statuses = ["cancelled", "running", "succeeded", "failed"];
+    if (typeof data.status !== "string" || !statuses.includes(data.status)) {
+      throw unknownReceipt("取消接口未返回可识别的实际任务状态。请查询原任务确认状态。");
+    }
+    if (typeof data.cancelled !== "boolean" || typeof data.already_cancelled !== "boolean"
+      || data.cancelled !== (data.status === "cancelled") || (data.already_cancelled && !data.cancelled)) {
+      throw unknownReceipt("取消接口未返回一致的取消回执。请查询原任务确认状态。");
+    }
+    const cancelled = data.status === "cancelled" && data.cancelled === true;
+    const result = { action: "cancel", task_ref: ref, data };
+    if (cancelled) return { ...result, status: "succeeded" };
+    return {
+      ...result,
+      ...failureResult(new AdpApiError(/^en(?:-|$)/i.test(client.language)
+        ? "The task has been claimed, expired, or finished and could not be cancelled."
+        : "任务已被领取、过期或结束，当前无法取消。", {
+        code: "TASK_NOT_CANCELLABLE", retryable: false
+      })),
+      next_steps: [taskStep(ref, "查询原任务的实际状态与可用结果。")]
+    };
+  } catch (error) {
+    if (signal?.aborted) throw error;
+    return { ...failureResult(error), action: "cancel", task_ref: ref };
+  }
+}
+
 async function queryTask(ref: TaskRef, client: AdpClient, signal?: AbortSignal): Promise<JsonObject> {
   const envelope = await client.request(taskPath(ref.kind, `/query/task/${ref.id}`, client), { signal });
   const data = requireData(envelope);
@@ -596,15 +662,18 @@ async function queryTask(ref: TaskRef, client: AdpClient, signal?: AbortSignal):
 function taskStatus(kind: TaskKind, status: unknown): ResultStatus | undefined {
   if (kind === "parse" || kind === "extract") {
     if (status === 4) return "succeeded";
-    if (status === 5 || status === 6) return "failed";
+    if (status === 5) return "failed";
+    if (status === 6) return "cancelled";
     if (status === 0 || status === 1 || status === 2) return "pending";
   } else if (kind === "classify") {
     if (status === "success") return "succeeded";
     if (status === "failed") return "failed";
+    if (status === "cancelled") return "cancelled";
     if (status === "pending" || status === "running") return "pending";
   } else {
     if (status === "succeeded") return "succeeded";
-    if (status === "failed" || status === "cancelled" || status === "timeout") return "failed";
+    if (status === "failed" || status === "timeout") return "failed";
+    if (status === "cancelled") return "cancelled";
     if (status === "pending" || status === "running" || status === "paused") return "pending";
   }
   return undefined;
@@ -651,7 +720,7 @@ function taskStep(ref: TaskRef, message: string, queryError?: JsonObject): JsonO
   const retryAfter = queryError?.retry_after_ms;
   const stepMessage = typeof retryAfter === "number" && Number.isFinite(retryAfter) && retryAfter > 0
     ? `${message} 请等待至少 ${Math.ceil(retryAfter / 1000)} 秒再查询。` : message;
-  return { message: stepMessage, tool: "get_task", arguments: { task_ref: ref } };
+  return { message: stepMessage, tool: "task", arguments: { task_ref: ref } };
 }
 
 function usageFields(envelope: JsonObject): JsonObject {

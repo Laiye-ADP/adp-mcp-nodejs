@@ -49,11 +49,19 @@
    }
    ```
 
-3. 将对应文件的 `files[i].task_ref` 完整传给 `get_task`。使用 `next_steps` 中的续查参数也可以。
+3. 将对应文件的 `files[i].task_ref` 完整传给 `task`。使用 `next_steps` 中的续查参数也可以。
 
    ```json
    {"task_ref":{"kind":"extract","id":"<id-from-task_ref>"}}
    ```
+
+`task` 默认 `action: "query"`。任务标识三选一：完整 `task_ref`、工作流 `run_id`，或文档 `task_id` 与 `task_type`（`parse`、`extract`、`classify`）。需要取消时显式传 `action: "cancel"`。
+
+```json
+{"action":"cancel","task_ref":{"kind":"extract","id":"<id-from-task_ref>"}}
+```
+
+仅可取消尚未被领取的待执行文档任务，工作流仅支持查询。取消成功返回 `status: "succeeded"`，任务实际状态以 `data.status` 为准；未能取消时保留实际状态并返回 `TASK_NOT_CANCELLABLE`。查询已取消任务返回 `status: "cancelled"`，不视为工具错误。查询和取消始终使用原任务，不重新提交。
 
 ### 其他常见任务
 
@@ -86,7 +94,7 @@
 | `extract_custom_document` | `files`、`fields` | 预制应用未覆盖文种或所需字段时使用。传入文件地址和本次要抽取的 fields，每个字段提供 name，可选 prompt。同步返回这些字段的结构化结果。 |
 | `run_workflow` | `template_key`、`files` | 用 template_key 直接启动金融财报、财务应付或费用报销。将同一笔业务的材料放入同一个 files 数组。已上传的文件优先使用回执中的下载地址、文件名和类型。 |
 | `route_document` | `files`、`app_id` | 文种未知或同一文件混有多种文档时使用。传入已有分类应用的 app_id 和文件地址，返回分类片段的文种、原始页码及未分类页。需要继续抽取时，按分类结果选择抽取工具。 |
-| `get_task` | `task_ref` | 原样传入业务工具返回的 task_ref，查询原任务的状态、可用结果和用量。适用于 wait=false 提交后或等待超时后的续查。 |
+| `task` | `task_ref`、`run_id` 或 `task_id` + `task_type`（三选一） | 查询异步任务的状态、可用结果和用量，或取消任务。传入 task_ref、run_id 或 task_id 与 task_type 中的一种。action 默认为 query。仅取消尚未被领取的待执行文档任务，工作流支持查询。 |
 | `submit_user_feedback` | `feedback_type`、`content` | 提交用户的使用问题（issue）或改进建议（suggestion）。传入去除凭证和无关敏感信息的事实摘要，成功返回反馈编号。可附上用户明确同意提交的本地材料。 |
 
 <!-- tool-catalog:end -->
@@ -104,6 +112,8 @@ Use Node.js 20+ and the stdio configuration above. Set `ADP_ACCEPT_LANGUAGE` to 
 
 For a public-cloud Key without a matching CLI profile, MCP checks China first with a read-only request and checks Global only after an exact `404 Accessor not found`. A confirmed region is reused for the current process. Set `ADP_REGION` or `ADP_API_BASE_URL` to choose a target directly. Call `get_adp_guide` with `{}` for your region's presets, workflows and examples.
 
-Use `upload_temporary_file` for local files. Copy each returned `files[i].data.download_url` into the next tool's `files[i].url`. Read each file's own result or pass its `task_ref` to `get_task`. A workflow takes all its input files in one call and returns a top-level `task_ref`. Document tools accept 1–20 files per call and allow up to 3 in-flight requests, including applicable polling. The default automatic wait after submission is 60 seconds.
+Use `upload_temporary_file` for local files. Copy each returned `files[i].data.download_url` into the next tool's `files[i].url`. Read each file's own result or pass its `task_ref` to `task`. A workflow takes all its input files in one call and returns a top-level `task_ref`. Document tools accept 1–20 files per call and allow up to 3 in-flight requests, including applicable polling. The default automatic wait after submission is 60 seconds.
+
+`task` defaults to `action: "query"`. Provide exactly one identifier form: `task_ref`, a workflow `run_id`, or a document `task_id` plus `task_type` (`parse`, `extract`, or `classify`). Set `action: "cancel"` to cancel an unclaimed pending document task. Workflows support queries only. Successful cancellation returns `status: "succeeded"`; `data.status` is the actual task state. Refused cancellation returns `TASK_NOT_CANCELLABLE` and retains the original state in `data`. Querying a cancelled task returns `status: "cancelled"` without a tool error. Neither action submits a new task.
 
 The `beta` tag tracks the preview. Pin `@laiye-adp/mcp@2.0.0-beta.2` for this release. From source, run `npm ci`, `npm run build` and `npm test`. [Connectivity and authentication](https://adp-doc.laiye.com/en/api-reference/troubleshooting) · [Rate limits, concurrency and timeouts](https://adp-doc.laiye.com/en/api-reference/rate-limits)

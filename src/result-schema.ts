@@ -65,18 +65,25 @@ export function resultSchemas(taskReference: ObjectSchema) {
     }, ["data"], meteredBatch),
     run_workflow: toolResult({ data: workflowData }, ["data"], { usage: workflowUsage, task: true }),
     route_document: toolResult({ data: classifyData }, ["data"], taskBatch),
-    get_task: {
-      ...toolResult({ data: openObject }, ["data"], { usage: openObject, task: true }),
+    task: {
+      ...toolResult({ data: openObject, action: { type: "string", enum: ["query", "cancel"] } }, ["data"], { usage: openObject, task: true }),
       allOf: [
         {
           if: matchesTaskKind("workflow"),
           then: { properties: { usage: workflowUsage } },
           else: { properties: { usage: documentUsage } }
         },
-        ...Object.entries(taskData).map(([kind, data]) => ({
-          if: matchesTaskKind(kind),
-          then: { properties: { data } }
-        }))
+        {
+          if: { required: ["action"], properties: { action: { const: "cancel" } } },
+          then: { properties: { data: dataFields({
+              task_id: text,
+              status: { type: "string", enum: ["cancelled", "running", "succeeded", "failed"] },
+              cancelled: { type: "boolean" }, already_cancelled: { type: "boolean" }
+            }, ["task_id", "status", "cancelled", "already_cancelled"]) } },
+          else: { allOf: Object.entries(taskData).map(([kind, data]) => ({
+            if: matchesTaskKind(kind), then: { properties: { data } }
+          })) }
+        }
       ]
     },
     submit_user_feedback: toolResult({
@@ -85,7 +92,7 @@ export function resultSchemas(taskReference: ObjectSchema) {
   };
 
   function toolResult(payload: Record<string, Schema>, successRequired: string[], options: ResultOptions = {}): ObjectSchema {
-    const statuses = options.task ? ["succeeded", "failed", "pending"] : ["succeeded", "failed"];
+    const statuses = options.task ? ["succeeded", "failed", "pending", "cancelled"] : ["succeeded", "failed"];
     const properties: Record<string, Schema> = {
       status: { type: "string", enum: statuses },
       ...payload,
@@ -108,7 +115,10 @@ export function resultSchemas(taskReference: ObjectSchema) {
     const variants = [
       statusVariant("succeeded", options.task ? [...successRequired, "task_ref"] : successRequired),
       statusVariant("failed", ["error"]),
-      ...(options.task ? [statusVariant("pending", ["task_ref", "data", "next_steps"])] : [])
+      ...(options.task ? [
+        statusVariant("pending", ["task_ref", "data", "next_steps"]),
+        statusVariant("cancelled", ["task_ref", "data"])
+      ] : [])
     ];
     const single: ObjectSchema = {
       type: "object", properties, required: ["status"], additionalProperties: false, oneOf: variants

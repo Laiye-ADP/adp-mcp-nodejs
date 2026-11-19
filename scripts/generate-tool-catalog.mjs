@@ -71,6 +71,9 @@ if (updated !== readme && args.includes("--check")) {
 }
 
 function requiredInput(schema) {
+  if (schema.properties.task_ref && schema.properties.run_id && schema.properties.task_id && schema.properties.task_type) {
+    return "`task_ref`、`run_id` 或 `task_id` + `task_type`（三选一）";
+  }
   const required = (schema.required ?? []).map(code);
   if (schema.oneOf?.length && schema.oneOf.every(({ required }) => required?.length)) {
     const choices = schema.oneOf.map(({ required }) => required.map(code).join("、")).join(" 或 ");
