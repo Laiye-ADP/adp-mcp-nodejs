@@ -19,39 +19,67 @@ if (begin < 0 || end < begin || readme.lastIndexOf(beginMarker) !== begin || rea
   throw new Error("README.md must contain one ordered pair of tool catalog markers.");
 }
 
-const client = new Client({ name: "node-v2-tool-catalog", version: "1" });
-const transport = new StdioClientTransport({
-  command: process.execPath,
-  args: [fileURLToPath(new URL("../dist/index.js", import.meta.url))],
-  env: { ADP_API_KEY: "", ADP_API_BASE_URL: "https://adp.laiye.com", ADP_REGION: "cn", ADP_TENANT_NAME: "laiye" }
-});
-const tools = [];
-let version;
-try {
-  await client.connect(transport);
-  version = client.getServerVersion()?.version;
-  const seenCursors = new Set();
-  let cursor;
-  do {
-    const page = await client.listTools(cursor ? { cursor } : undefined);
-    tools.push(...page.tools);
-    cursor = page.nextCursor;
-    if (cursor && seenCursors.has(cursor)) throw new Error("Tool list returned a repeated cursor.");
-    if (cursor) seenCursors.add(cursor);
-  } while (cursor);
-} finally {
-  await client.close();
+async function readTools(region) {
+  const client = new Client({ name: "node-v2-tool-catalog", version: "1" });
+  const transport = new StdioClientTransport({
+    command: process.execPath,
+    args: [fileURLToPath(new URL("../dist/index.js", import.meta.url))],
+    env: {
+      ADP_API_KEY: "", ADP_API_BASE_URL: region === "cn" ? "https://adp.laiye.com" : "https://adp-global.laiye.com",
+      ADP_REGION: region, ADP_TENANT_NAME: "laiye"
+    }
+  });
+  const tools = [];
+  let version;
+  try {
+    await client.connect(transport);
+    version = client.getServerVersion()?.version;
+    const seenCursors = new Set();
+    let cursor;
+    do {
+      const page = await client.listTools(cursor ? { cursor } : undefined);
+      tools.push(...page.tools);
+      cursor = page.nextCursor;
+      if (cursor && seenCursors.has(cursor)) throw new Error("Tool list returned a repeated cursor.");
+      if (cursor) seenCursors.add(cursor);
+    } while (cursor);
+  } finally {
+    await client.close();
+  }
+  if (!version || !tools.length || new Set(tools.map(({ name }) => name)).size !== tools.length) {
+    throw new Error(`Expected a version and unique ${region} tool definitions.`);
+  }
+  return { version, tools };
 }
-if (!version || !tools.length || new Set(tools.map(({ name }) => name)).size !== tools.length) {
-  throw new Error("Expected a version and a nonempty tool list with unique names.");
+const regions = { cn: await readTools("cn"), global: await readTools("global") };
+const commonNames = new Set([
+  "get_adp_guide", "upload_temporary_file", "parse_document", "extract_document",
+  "extract_custom_document", "route_document", "task", "submit_user_feedback"
+]);
+const regionalOnly = { cn: ["verify_domestic_invoice"], global: [] };
+for (const region of ["cn", "global"]) {
+  const expected = new Set([...commonNames, ...regionalOnly[region]]);
+  if (regions[region].tools.length !== expected.size || regions[region].tools.some(({ name }) => !expected.has(name))) {
+    throw new Error(`Unexpected ${region} tool definitions: expected ${expected.size} tools.`);
+  }
 }
+if (regions.cn.version !== regions.global.version) throw new Error("Regional server versions differ.");
+const version = regions.cn.version;
+const tools = regions.cn.tools.filter(({ name }) => commonNames.has(name));
+const globalInputs = new Map(regions.global.tools.map(({ name, inputSchema }) => [name, requiredInput(inputSchema)]));
+for (const { name, inputSchema } of tools) {
+  if (requiredInput(inputSchema) !== globalInputs.get(name)) throw new Error(`Regional required inputs differ for ${name}.`);
+}
+const publicDescriptions = {
+  extract_document: "已知文种且预制字段满足需求时使用。从 get_adp_guide 选取当前区域的预制 app_id，传入文件地址并获取结构化业务字段。选填开关按预制应用支持范围生效。"
+};
 
 const rows = tools.map(({ name, description, inputSchema }) =>
-  `| ${code(name)} | ${requiredInput(inputSchema)} | ${markdownCell(description ?? "")} |`);
+  `| ${code(name)} | ${requiredInput(inputSchema)} | ${markdownCell(publicDescriptions[name] ?? description ?? "")} |`);
 const catalog = [
   beginMarker,
   "",
-  `版本 ${code(version)}，中国区共 **${tools.length}** 个工具。全球区预制应用和参数以当前连接的工具定义及引导说明为准。`,
+  `版本 ${code(version)}，下表列出两区通用的 **${tools.length}** 个工具。区域专属工具和参数以当前连接的工具定义为准。`,
   "",
   "| 工具 | 必填参数 | 用途 |",
   "| --- | --- | --- |",
@@ -60,6 +88,9 @@ const catalog = [
   endMarker
 ].join("\n");
 const updated = readme.slice(0, begin) + catalog + readme.slice(end + endMarker.length);
+if (/verify_domestic_invoice|enable_invoice_verify|发票验真|invoice verification/i.test(updated)) {
+  throw new Error("README must describe common tools only; regional capabilities stay in tool discovery.");
+}
 if (updated !== readme && args.includes("--check")) {
   console.error("Node v2 tool catalog is stale. Build and run npm run catalog:generate.");
   process.exitCode = 1;
@@ -67,7 +98,7 @@ if (updated !== readme && args.includes("--check")) {
   if (updated !== readme) {
     await writeFile(readmePath, original.includes("\r\n") ? updated.replaceAll("\n", "\r\n") : updated);
   }
-  console.log(`Node v2 tool catalog matches ${tools.length} tools from ${version}.`);
+  console.log(`Node v2 tool catalog matches ${tools.length} common tools from ${version}; regional definitions CN=${regions.cn.tools.length}, Global=${regions.global.tools.length}.`);
 }
 
 function requiredInput(schema) {

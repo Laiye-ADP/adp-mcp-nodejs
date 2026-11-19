@@ -70,7 +70,7 @@ ${regionNote}
 | --- | --- |
 ${presets}
 
-${global ? "" : "For the domestic bills preset, set `enable_invoice_verify` to enable or disable verification for this call. Omit it or pass `null` to use the app setting.\n\n"}\
+
 The global and Southeast Asia high-speed invoice presets support \`enable_multi_ticket\` (default \`true\`), \`enable_highlight\`, and \`enable_confidence\`. Use \`enable_field_value_translation\` with an overseas invoice preset to override field-value translation for this call.
 
 Set \`with_rec_result: true\` when you need the parsing result from a preset that supports it. To get full text independently, use \`parse_document\`.
@@ -131,7 +131,7 @@ ${regionNote}
 | --- | --- |
 ${presets}
 
-${global ? "" : "国内通用票据支持用 `enable_invoice_verify` 为本次抽取开启或关闭发票验真。省略或传 `null` 时沿用应用配置。\n\n"}\
+
 海外发票的国际通用高速版和东南亚高速版支持 \`enable_multi_ticket\`（默认 \`true\`）、\`enable_highlight\` 和 \`enable_confidence\`。海外发票可用 \`enable_field_value_translation\` 控制本次字段值翻译。
 
 如果所选预制应用支持随抽取返回解析结果，可传 \`with_rec_result: true\`。需要单独取得全文时，使用 \`parse_document\`。

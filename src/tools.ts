@@ -50,6 +50,21 @@ const waitProperties: Record<string, Schema> = {
 };
 const pages: Schema = { type: "array", items: { type: "integer", minimum: 1 }, uniqueItems: true, default: [],
   description: "选填，省略或传 [] 时处理全部页面。只处理指定页时填写原始页码，从 1 开始且不能重复。" };
+const invoiceTypes = [
+  { key: "vat_special_invoice", label: "增值税专用发票", fields: ["fpCode", "fpNoTaxAmount"] },
+  { key: "vat_electronic_special_invoice", label: "增值税电子专用发票", fields: ["fpCode", "fpNoTaxAmount"] },
+  { key: "vat_common_invoice", label: "增值税普通发票", fields: ["fpCode", "fpCRC"] },
+  { key: "vat_electronic_invoice", label: "增值税电子普通发票", fields: ["fpCode", "fpCRC"] },
+  { key: "vat_roll_invoice", label: "增值税发票卷票", fields: ["fpCode", "fpCRC"] },
+  { key: "vat_electronic_special_invoice_new", label: "电子发票增值税专用发票", fields: ["fpAmount"] },
+  { key: "vat_electronic_invoice_new", label: "电子发票普通发票", fields: ["fpAmount"] },
+  { key: "motor_vehicle_sale_invoice", label: "机动车销售统一发票", fields: ["fpCode", "fpNoTaxAmount"] },
+  { key: "used_car_purchase_invoice", label: "二手车销售统一发票", fields: ["fpCode", "fpAmount"] },
+  { key: "electronic_air_transport", label: "电子发票航空运输电子客票行程单", fields: ["fpAmount"] },
+  { key: "electronic_train_ticket", label: "电子发票铁路电子客票", fields: ["fpAmount"] }
+] as const;
+const defaultInvoiceType = "vat_electronic_invoice_new";
+const invoiceInputFields = ["fpNumber", "fpDate", "fpCode", "fpAmount", "fpNoTaxAmount", "fpCRC", "instance_id"] as const;
 
 function buildTools(region: AdpRegion) {
   const global = region === "global";
@@ -130,6 +145,22 @@ function buildTools(region: AdpRegion) {
       annotations: submit,
       outputSchema: output.route_document
     },
+    ...(!global ? [{
+      name: "verify_domestic_invoice", title: "国内发票验真",
+      description: "仅用于中国区的中国大陆发票独立验真；海外发票和收据不适用。根据票面字段对一张发票验真，无需上传文件。fpNumber、fpDate 始终必填，11 种票据还需填写的字段见下表。type_key 默认 vat_electronic_invoice_new，仅确认是全电普通发票时可省略，文种不明时先确认。缺少关键字段时先抽取或询问用户，不要猜测。使用非空字符串，保留号码前导零。调用可能消耗积分。应结合 verification_status 和 data.result.fpVerification 判断：consistent 表示票面信息一致，inconsistent 表示不一致，not_found 表示未找到匹配发票。这三种均返回 status=succeeded，表示已取得可判定结论，succeeded 不代表发票一致。即使信息一致，也应查看 data.result.fpIsVoided 的作废或冲红状态。不一致或不存在不能直接认定伪造。unverifiable、unsupported、unknown 返回 status=failed 并保留原始 data。不要自动重复提交。usage 仅返回接口已有积分记录，usage_status=unavailable 表示未返回积分金额。\nvat_special_invoice (增值税专用发票): fpCode, fpNoTaxAmount\nvat_electronic_special_invoice (增值税电子专用发票): fpCode, fpNoTaxAmount\nvat_common_invoice (增值税普通发票): fpCode, fpCRC\nvat_electronic_invoice (增值税电子普通发票): fpCode, fpCRC\nvat_roll_invoice (增值税发票卷票): fpCode, fpCRC\nvat_electronic_special_invoice_new (电子发票增值税专用发票): fpAmount\nvat_electronic_invoice_new (电子发票普通发票): fpAmount\nmotor_vehicle_sale_invoice (机动车销售统一发票): fpCode, fpNoTaxAmount\nused_car_purchase_invoice (二手车销售统一发票): fpCode, fpAmount\nelectronic_air_transport (电子发票航空运输电子客票行程单): fpAmount\nelectronic_train_ticket (电子发票铁路电子客票): fpAmount",
+      inputSchema: objectSchema({
+        type_key: { ...requiredText, enum: invoiceTypes.map(({ key }) => key), default: defaultInvoiceType, description: "票据类型，默认电子发票普通发票；仅确认全电普通发票时可省略，文种不明先确认。11 种类型的名称与必填字段见本工具描述。" },
+        fpNumber: { ...requiredText, description: "发票号码，始终必填；按票面原样填写并保留前导零。" },
+        fpDate: { ...requiredText, description: "开票日期、填制日期或乘车日期，始终必填；按票面填写，例如 2026-06-01。" },
+        fpCode: { ...requiredText, description: "发票代码。vat_special_invoice、vat_electronic_special_invoice、vat_common_invoice、vat_electronic_invoice、vat_roll_invoice、motor_vehicle_sale_invoice、used_car_purchase_invoice 必填；其他票种可省略。保留前导零。" },
+        fpAmount: { ...requiredText, description: "价税合计、票价或合计金额字符串。vat_electronic_special_invoice_new、vat_electronic_invoice_new、used_car_purchase_invoice、electronic_air_transport、electronic_train_ticket 必填；其他票种可省略。" },
+        fpNoTaxAmount: { ...requiredText, description: "不含税金额字符串。vat_special_invoice、vat_electronic_special_invoice、motor_vehicle_sale_invoice 必填，使用票面不含税金额；其他票种可省略。" },
+        fpCRC: { ...requiredText, description: "校验码。vat_common_invoice、vat_electronic_invoice、vat_roll_invoice 必填；可传完整校验码，服务使用末 6 位。其他票种可省略。" },
+        instance_id: { ...requiredText, description: "可选的业务侧实例 ID，省略时由接口生成。" }
+      }, ["fpNumber", "fpDate"]),
+      annotations: submit,
+      outputSchema: output.verify_domestic_invoice
+    }] : []),
     {
       name: "task", title: "任务管理",
       description: "查询异步任务的状态、可用结果和用量，或取消任务。传入 task_ref、run_id 或 task_id 与 task_type 中的一种。action 默认为 query。仅取消尚未被领取的待执行文档任务，工作流支持查询。",
@@ -202,6 +233,11 @@ export async function callTool(
   name: string, args: JsonObject, client: AdpClient, version: string, signal?: AbortSignal
 ): Promise<JsonObject> {
   const region = name === "get_adp_guide" ? await client.getCatalogRegion(signal) : await client.prepareConnection(signal);
+  if (name === "verify_domestic_invoice" && !client.domesticInvoiceRegionConfirmed) {
+    throw new AdpApiError("国内发票验真仅支持已确认的中国区连接，请核对API Key和区域配置。", {
+      code: "INVOICE_VERIFICATION_REGION_UNSUPPORTED", retryable: false
+    });
+  }
   const validators = inputValidators[region].get(name);
   if (!validators) throw new Error("未知工具。");
 
@@ -231,6 +267,8 @@ export async function callTool(
       };
     case "upload_temporary_file":
       return uploadFiles(args, client, signal);
+    case "verify_domestic_invoice":
+      return verifyDomesticInvoice(args, client, signal);
     case "task": {
       const ref = resolveTaskReference(args);
       return args.action === "cancel"
@@ -433,6 +471,43 @@ async function extractDirect(
     const data = envelope.data;
     if (!isObject(data) || !Array.isArray(data.extraction_result)) throw unknownReceipt("自定义抽取接口未返回抽取结果。");
     return { status: "succeeded", data, ...usageFields(envelope) };
+  } catch (error) {
+    if (signal?.aborted) throw error;
+    return failureResult(error, true);
+  }
+}
+
+async function verifyDomesticInvoice(args: JsonObject, client: AdpClient, signal?: AbortSignal): Promise<JsonObject> {
+  const typeKey = (args.type_key as string | undefined) ?? defaultInvoiceType;
+  const definition = invoiceTypes.find(({ key }) => key === typeKey)!;
+  const body: JsonObject = { type_key: typeKey };
+  for (const field of invoiceInputFields) {
+    if (typeof args[field] === "string" && args[field].trim()) body[field] = args[field].trim();
+  }
+  const missing = ["fpNumber", "fpDate", ...definition.fields].filter(field => body[field] === undefined);
+  if (missing.length) {
+    throw new AdpApiError(`${definition.label}缺少验真要素：${missing.join("、")}。请先抽取或向用户询问，不要猜测。`, {
+      code: "INVOICE_VERIFICATION_INPUT_REQUIRED", retryable: false
+    });
+  }
+  try {
+    const envelope = await client.request(client.documentPath("/v1/app/invoice/verify"), { method: "POST", body, signal });
+    const data = requireData(envelope);
+    const rawStatus = isObject(data.result) ? data.result.fpVerification : undefined;
+    const statuses: Record<string, string> = {
+      "查验成功发票一致": "consistent", "查验成功发票不一致": "inconsistent", "发票不存在": "not_found",
+      "未能查验": "unverifiable", "不支持查验": "unsupported"
+    };
+    const normalizedStatus = typeof rawStatus === "string" ? rawStatus.trim() : "";
+    const verificationStatus = Object.hasOwn(statuses, normalizedStatus) ? statuses[normalizedStatus] : "unknown";
+    const result = { data, verification_status: verificationStatus, ...usageFields(envelope) };
+    if (["consistent", "inconsistent", "not_found"].includes(verificationStatus)) return { status: "succeeded", ...result };
+    const failure = verificationStatus === "unverifiable"
+      ? { code: "INVOICE_UNVERIFIABLE", message: "未能完成查验，请查看原始验真提示。" }
+      : verificationStatus === "unsupported"
+        ? { code: "INVOICE_VERIFICATION_UNSUPPORTED", message: "当前发票不支持查验，请查看原始验真提示。" }
+        : { code: "INVOICE_VERIFICATION_UNKNOWN", message: "无法判定验真结论，请查看原始验真结果。" };
+    return { ...failureResult(new AdpApiError(failure.message, { code: failure.code, retryable: false })), ...result };
   } catch (error) {
     if (signal?.aborted) throw error;
     return failureResult(error, true);

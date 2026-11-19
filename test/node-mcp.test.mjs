@@ -12,6 +12,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { AjvJsonSchemaValidator } from "@modelcontextprotocol/sdk/validation/ajv";
 import { AdpClient } from "../dist/adp-client.js";
+import { callTool } from "../dist/tools.js";
 
 const entry = fileURLToPath(new URL("../dist/index.js", import.meta.url));
 const documentPrefix = "/open/agentic_doc_processor/test-tenant/v1/app/doc";
@@ -163,6 +164,171 @@ test("the guide follows the configured language and accepts a legacy override", 
   const chinese = await call(client, "get_adp_guide", { language: "zh-CN" });
   assert.match(chinese.structuredContent.markdown, /国内通用票据/);
   assert.equal(calls.length, 0);
+});
+
+test("China advertises a flat standalone invoice tool and preserves the original verification data", async t => {
+  const data = { result: { fpVerification: "查验成功发票一致", fpVerificationMsg: "", fpIsVoided: "未作废",
+    fpNumber: "0000123", fpItems: [{ name: "服务费", amount: "100.00" }] },
+    metadata: { trace_id: "trace-1", attempt_verify_page_count: 1, actual_consume_page_count: 1, billable_pages: 1 } };
+  const { client, calls } = await connect(t, () => ok(data), "test-key", { ADP_REGION: "cn" });
+  const { tools } = await client.listTools();
+  assert.equal(tools.length, 9);
+  const tool = tools.find(({ name }) => name === "verify_domestic_invoice");
+  assert.equal(tool.title, "国内发票验真");
+  assert.deepEqual(tool.inputSchema.required, ["fpNumber", "fpDate"]);
+  assert.equal(tool.inputSchema.oneOf, undefined);
+  assert.equal(tool.inputSchema.anyOf, undefined);
+  assert.equal(tool.inputSchema.properties.type_key.default, "vat_electronic_invoice_new");
+  assert.equal(tool.inputSchema.properties.type_key.enum.length, 11);
+  for (const key of tool.inputSchema.properties.type_key.enum) assert.ok(tool.description.includes(key));
+  assert.ok(Object.values(tool.inputSchema.properties).every(({ description }) => description));
+  const reply = await call(client, "verify_domestic_invoice", {
+    fpNumber: "0000123", fpDate: "2026-06-01", fpAmount: "100.00"
+  });
+  assert.notEqual(reply.isError, true);
+  assert.equal(reply.structuredContent.verification_status, "consistent");
+  assert.deepEqual(reply.structuredContent.data, data);
+  assert.equal(reply.structuredContent.usage_status, "unavailable");
+  assert.equal(reply.structuredContent.usage, undefined);
+  assert.deepEqual(calls.map(({ method, path, body }) => ({ method, path, body })), [{
+    method: "POST", path: "/open/agentic_doc_processor/test-tenant/v1/app/invoice/verify",
+    body: { type_key: "vat_electronic_invoice_new", fpNumber: "0000123", fpDate: "2026-06-01", fpAmount: "100.00" }
+  }]);
+  const guide = await call(client, "get_adp_guide");
+  assert.doesNotMatch(guide.structuredContent.markdown, /verify_domestic_invoice|enable_invoice_verify|发票验真/);
+});
+
+test("standalone invoice verification enforces each type's nonempty required strings without inventing formats", async t => {
+  const { client, calls } = await connect(t, () => ok({ result: { fpVerification: "查验成功发票一致" } }), "test-key", { ADP_REGION: "cn" });
+  const matrix = [
+    ["vat_special_invoice", ["fpCode", "fpNoTaxAmount"]],
+    ["vat_electronic_special_invoice", ["fpCode", "fpNoTaxAmount"]],
+    ["vat_common_invoice", ["fpCode", "fpCRC"]],
+    ["vat_electronic_invoice", ["fpCode", "fpCRC"]],
+    ["vat_roll_invoice", ["fpCode", "fpCRC"]],
+    ["vat_electronic_special_invoice_new", ["fpAmount"]],
+    ["vat_electronic_invoice_new", ["fpAmount"]],
+    ["motor_vehicle_sale_invoice", ["fpCode", "fpNoTaxAmount"]],
+    ["used_car_purchase_invoice", ["fpCode", "fpAmount"]],
+    ["electronic_air_transport", ["fpAmount"]],
+    ["electronic_train_ticket", ["fpAmount"]]
+  ];
+  const values = { fpNumber: "0000123", fpDate: "2026/06/01", fpCode: "000001", fpAmount: "100.001", fpNoTaxAmount: "90.001", fpCRC: "000123456789" };
+  for (const [type_key, fields] of matrix) {
+    const input = { type_key, fpNumber: values.fpNumber, fpDate: values.fpDate,
+      ...Object.fromEntries(fields.map(field => [field, values[field]])) };
+    for (const field of fields) {
+      const before = calls.length;
+      const incomplete = { ...input };
+      delete incomplete[field];
+      const reply = await call(client, "verify_domestic_invoice", incomplete);
+      assert.equal(reply.isError, true);
+      assert.equal(reply.structuredContent.error.code, "INVOICE_VERIFICATION_INPUT_REQUIRED");
+      assert.equal(calls.length, before);
+    }
+    const valid = await call(client, "verify_domestic_invoice", input);
+    assert.notEqual(valid.isError, true);
+    assert.deepEqual(calls.at(-1).body, input);
+  }
+  const before = calls.length;
+  for (const args of [
+    { fpNumber: "1", fpDate: "2026-06-01" },
+    { fpNumber: "1", fpDate: "2026-06-01", fpAmount: "  " },
+    { fpNumber: "1", fpDate: "2026-06-01", fpAmount: 100 },
+    { fpNumber: 1, fpDate: "2026-06-01", fpAmount: "100" },
+    { fpNumber: "1", fpDate: "2026-06-01", fpAmount: "100", type_key: "unknown" }
+  ]) assert.equal((await call(client, "verify_domestic_invoice", args)).isError, true);
+  assert.equal(calls.length, before);
+});
+
+test("invoice conclusions distinguish a completed check from consistency and never retry inconclusive results", async t => {
+  const answers = new Map([
+    ["consistent", ["查验成功发票一致", undefined]], ["inconsistent", ["查验成功发票不一致", undefined]],
+    ["not_found", ["发票不存在", undefined]], ["unverifiable", ["未能查验", "INVOICE_UNVERIFIABLE"]],
+    ["unsupported", ["不支持查验", "INVOICE_VERIFICATION_UNSUPPORTED"]],
+    ["unknown", ["新增状态", "INVOICE_VERIFICATION_UNKNOWN"]], ["prototype", ["constructor", "INVOICE_VERIFICATION_UNKNOWN"]],
+    ["spaced", [" 查验成功发票一致 ", undefined]]
+  ]);
+  const { client, calls } = await connect(t, ({ body }) => ({
+    ...ok({ result: { fpVerification: answers.get(body.fpNumber)[0], fpIsVoided: "已作废", extra: "preserved" }, metadata: { billable_pages: 1 } }),
+    ...(body.fpNumber === "consistent" ? { usage: recordedUsage } : {})
+  }), "test-key", { ADP_REGION: "cn" });
+  for (const [key, [rawStatus, errorCode]] of answers) {
+    const reply = await call(client, "verify_domestic_invoice", { fpNumber: key, fpDate: "2026-06-01", fpAmount: "100" });
+    const result = reply.structuredContent;
+    assert.equal(result.verification_status, key === "prototype" ? "unknown" : key === "spaced" ? "consistent" : key);
+    assert.equal(result.status, errorCode ? "failed" : "succeeded");
+    assert.equal(reply.isError === true, !!errorCode);
+    assert.equal(result.data.result.fpVerification, rawStatus);
+    assert.equal(result.data.result.fpIsVoided, "已作废");
+    assert.equal(result.data.result.extra, "preserved");
+    assert.deepEqual(result.data.metadata, { billable_pages: 1 });
+    if (errorCode) {
+      assert.equal(result.error.code, errorCode);
+      assert.equal(result.error.retryable, false);
+    }
+    if (key === "consistent") assert.deepEqual(result.usage, recordedUsage);
+    else {
+      assert.equal(result.usage_status, "unavailable");
+      assert.equal(result.usage, undefined);
+    }
+  }
+  assert.equal(calls.length, answers.size);
+  assert.ok(calls.every(({ method }) => method === "POST"));
+});
+
+test("Global and unconfirmed custom targets hide invoice verification and reject direct calls without HTTP", async t => {
+  for (const environment of [{ ADP_REGION: "global" }, {}]) {
+    const { client, calls } = await connect(t, () => { throw new Error("Unexpected upstream request"); }, "test-key", environment);
+    const { tools } = await client.listTools();
+    assert.equal(tools.length, 8);
+    assert.equal(tools.some(({ name }) => name === "verify_domestic_invoice"), false);
+    const reply = await call(client, "verify_domestic_invoice", { fpNumber: "1", fpDate: "2026-06-01", fpAmount: "100" });
+    assert.equal(reply.isError, true);
+    assert.equal(reply.structuredContent.error.code, "INVOICE_VERIFICATION_REGION_UNSUPPORTED");
+    assert.equal(calls.length, 0);
+  }
+});
+
+test("invoice visibility recognizes explicit China and confirmed China but never a failed discovery fallback", async t => {
+  const profile = await cliProfile(t);
+  const requests = [];
+  t.mock.method(globalThis, "fetch", async (url, options) => {
+    requests.push({ path: url.pathname, method: options.method });
+    return new Headers(options.headers).get("X-API-KEY") === "confirmed-key"
+      ? Response.json(ok({ events: [] })) : Response.json({ detail: "unavailable" }, { status: 503 });
+  });
+  const common = { USERPROFILE: profile.profileDir };
+  const unconfigured = new AdpClient(common);
+  assert.equal(await unconfigured.getCatalogRegion(), "cn");
+  assert.equal(unconfigured.domesticInvoiceRegionConfirmed, false);
+  for (const target of [{ ADP_REGION: "cn" }, { ADP_API_BASE_URL: cnOrigin }]) {
+    const explicit = new AdpClient({ ...common, ...target });
+    assert.equal(await explicit.getCatalogRegion(), "cn");
+    assert.equal(explicit.domesticInvoiceRegionConfirmed, true);
+    const missing = await callTool("verify_domestic_invoice", { fpNumber: "1", fpDate: "2026-06-01", fpAmount: "100" }, explicit, "test");
+    assert.equal(missing.status, "failed");
+    assert.equal(missing.error.code, "MISSING_API_KEY");
+  }
+  assert.equal(requests.length, 0);
+  const confirmed = new AdpClient({ ...common, ADP_API_KEY: "confirmed-key" });
+  assert.equal(await confirmed.getCatalogRegion(), "cn");
+  assert.equal(confirmed.domesticInvoiceRegionConfirmed, true);
+  const failed = new AdpClient({ ...common, ADP_API_KEY: "unconfirmed-key" });
+  assert.equal(await failed.getCatalogRegion(), "cn");
+  assert.equal(failed.domesticInvoiceRegionConfirmed, false);
+  await assert.rejects(() => callTool("verify_domestic_invoice", { fpNumber: "1", fpDate: "2026-06-01", fpAmount: "100" }, failed, "test"),
+    error => error.details.http_status === 503);
+  assert.equal(requests.length, 3);
+  assert.ok(requests.every(({ path, method }) => path === discoveryPath && method === "GET"));
+  const invalid = new AdpClient({ ...common, ADP_REGION: "invalid" });
+  assert.equal(await invalid.getCatalogRegion(), "cn");
+  assert.equal(invalid.domesticInvoiceRegionConfirmed, false);
+  await profile.write("saved-key", cnOrigin);
+  const saved = new AdpClient(common);
+  assert.equal(await saved.getCatalogRegion(), "cn");
+  assert.equal(saved.domesticInvoiceRegionConfirmed, true);
+  assert.equal(requests.length, 3);
 });
 
 test("parse waits on its original task and extraction can be queried later with usage", async t => {

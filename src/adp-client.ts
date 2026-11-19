@@ -130,6 +130,16 @@ export class AdpClient {
     return this.#catalogRegionConfirmed;
   }
 
+  get domesticInvoiceRegionConfirmed(): boolean {
+    if (!this.#catalogRegionConfirmed) return false;
+    const connection = this.#getConnection();
+    const baseUrl = this.#env.ADP_API_BASE_URL?.trim() || this.#env.ADP_BASE_URL?.trim();
+    const explicitChina = this.#env.ADP_REGION?.trim() === "cn"
+      || (!!baseUrl && officialRegion(connection.origin) === "cn");
+    const confirmedChina = !!connection.apiKey && !connection.discoverRegion && officialRegion(connection.origin) === "cn";
+    return connection.region === "cn" && (explicitChina || confirmedChina);
+  }
+
   async getCatalogRegion(signal?: AbortSignal): Promise<AdpRegion> {
     try {
       const region = await this.prepareConnection(signal);

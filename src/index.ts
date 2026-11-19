@@ -20,8 +20,9 @@ const server = new Server(
 
 const regions: RegionCache = new Map();
 server.setRequestHandler(ListToolsRequestSchema, async (_request, { signal }) => {
-  const region = await new AdpClient(process.env, regions).getCatalogRegion(signal);
-  return { tools: tools[region] };
+  const client = new AdpClient(process.env, regions);
+  const region = await client.getCatalogRegion(signal);
+  return { tools: tools[region].filter(({ name }) => name !== "verify_domestic_invoice" || client.domesticInvoiceRegionConfirmed) };
 });
 
 server.setRequestHandler(CallToolRequestSchema, async ({ params }, { signal }) => {

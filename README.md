@@ -70,7 +70,7 @@
 - **识别混合文种**用 `route_document`，传入已有分类应用的 `app_id` 和 `files`。返回各文种片段和页码。 [分类应用说明](https://adp-doc.laiye.com/api-reference/adp-api/document-classification/overview)
 - **提交反馈**用 `submit_user_feedback`。传 `feedback_type` 和 `content`。经用户明确授权后可附本地材料。
 
-两区都支持通用文档解析、采购订单及三种海外发票和收据预制抽取。中国区另外提供国内通用票据和卡证。发票验真选项 `enable_invoice_verify` 适用于国内通用票据。
+两区都支持通用文档解析、采购订单及三种海外发票和收据预制抽取。中国区另外提供国内通用票据和卡证。区域专属工具和参数以当前连接的工具定义为准。
 
 ### 批量、状态和用量
 
@@ -82,14 +82,14 @@
 
 <!-- tool-catalog:start -->
 
-版本 `2.0.0-beta.2`，中国区共 **8** 个工具。全球区预制应用和参数以当前连接的工具定义及引导说明为准。
+版本 `2.0.0-beta.2`，下表列出两区通用的 **8** 个工具。区域专属工具和参数以当前连接的工具定义为准。
 
 | 工具 | 必填参数 | 用途 |
 | --- | --- | --- |
 | `get_adp_guide` | 无 | 获取与当前 MCP 连接版本和区域对应的 ADP 引导说明。正文包含预制应用名称与 app_id 对照表、文件上传步骤和文档处理调用示例。 |
 | `upload_temporary_file` | `files` | 将本机路径放入 files，每项填写 file_path，单文件也传一项。上传成功后从 files[].data 取 download_url。已有可访问的 HTTP(S) 文件地址时可直接用于业务工具。 |
 | `parse_document` | `files` | 需要阅读、检索或处理文档全文时使用。将文件地址放入 files，返回逐页文本和文档结构。可用 recognize_mode 选择解析模式，或用 pages 指定要解析的原始页码。 |
-| `extract_document` | `files`、`app_id` | 已知文种且预制字段满足需求时使用。从 get_adp_guide 选取预制 app_id，传入文件地址，获取票据、卡证、采购订单等文档的结构化业务字段。海外发票默认使用国际通用高速版。附带解析结果、多票拆分、发票验真、字段值翻译、原文定位和字段置信度均为选填开关。无需覆盖时省略对应参数，显式 false 会关闭适用功能。发票验真仅适用于国内通用票据。 |
+| `extract_document` | `files`、`app_id` | 已知文种且预制字段满足需求时使用。从 get_adp_guide 选取当前区域的预制 app_id，传入文件地址并获取结构化业务字段。选填开关按预制应用支持范围生效。 |
 | `extract_custom_document` | `files`、`fields` | 预制应用未覆盖文种或所需字段时使用。传入文件地址和本次要抽取的 fields，每个字段提供 name，可选 prompt。同步返回这些字段的结构化结果。 |
 | `route_document` | `files`、`app_id` | 文种未知或同一文件混有多种文档时使用。传入已有分类应用的 app_id 和文件地址，返回分类片段的文种、原始页码及未分类页。需要继续抽取时，按分类结果选择抽取工具。 |
 | `task` | `task_ref`、`run_id` 或 `task_id` + `task_type`（三选一） | 查询异步任务的状态、可用结果和用量，或取消任务。传入 task_ref、run_id 或 task_id 与 task_type 中的一种。action 默认为 query。仅取消尚未被领取的待执行文档任务，工作流支持查询。 |

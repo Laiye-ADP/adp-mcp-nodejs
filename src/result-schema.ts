@@ -64,6 +64,11 @@ export function resultSchemas(taskReference: ObjectSchema) {
       data: dataFields({ extraction_result: array }, ["extraction_result"])
     }, ["data"], meteredBatch),
     route_document: toolResult({ data: classifyData }, ["data"], taskBatch),
+    verify_domestic_invoice: toolResult({
+      data: { ...openObject, description: "服务端原始验真数据，包含result中的实际验真状态、作废状态及其他返回字段。" },
+      verification_status: { type: "string", enum: ["consistent", "inconsistent", "not_found", "unverifiable", "unsupported", "unknown"],
+        description: "consistent一致；inconsistent不一致；not_found不存在；unverifiable未能查验；unsupported不支持；unknown无法识别结论。工具成功不代表一致。" }
+    }, ["data", "verification_status"], { usage: documentUsage }),
     task: {
       ...toolResult({ data: openObject, action: { type: "string", enum: ["query", "cancel"] } }, ["data"], { usage: openObject, task: true }),
       allOf: [
