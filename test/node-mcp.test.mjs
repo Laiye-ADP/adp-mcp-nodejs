@@ -84,7 +84,7 @@ function call(client, name, args = {}) {
   return client.callTool({ name, arguments: args });
 }
 
-test("stdio registers the nine Node tools and delivers the guide without a key", async t => {
+test("stdio registers the eight Node tools and delivers the guide without a key", async t => {
   const profile = await cliProfile(t);
   const { client, calls } = await connect(t, () => {
     throw new Error("Unexpected upstream request");
@@ -92,7 +92,7 @@ test("stdio registers the nine Node tools and delivers the guide without a key",
   const { tools } = await client.listTools();
   assert.deepEqual(tools.map(tool => tool.name).sort(), [
     "extract_custom_document", "extract_document", "get_adp_guide", "parse_document",
-    "route_document", "run_workflow", "submit_user_feedback", "task", "upload_temporary_file"
+    "route_document", "submit_user_feedback", "task", "upload_temporary_file"
   ]);
   assert.ok(tools.every(tool => tool.description && tool.outputSchema?.type === "object"));
   const inputs = Object.fromEntries(tools.map(tool => [tool.name, tool.inputSchema]));
@@ -116,8 +116,6 @@ test("stdio registers the nine Node tools and delivers the guide without a key",
     assert.deepEqual(schema.properties.files.items.required, [itemRequired], name);
     assert.deepEqual(Object.keys(schema.properties.files.items.properties).sort(), itemKeys, name);
   }
-  assert.deepEqual([...inputs.run_workflow.required].sort(), ["files", "template_key"]);
-  assert.equal(inputs.run_workflow.properties.inputs, undefined);
   assert.deepEqual(inputs.task.required, []);
   assert.equal(inputs.task.oneOf, undefined);
   assert.equal(inputs.task.anyOf, undefined);
@@ -126,7 +124,6 @@ test("stdio registers the nine Node tools and delivers the guide without a key",
   assert.deepEqual(inputs.task.properties.task_type.enum, ["parse", "extract", "classify"]);
   assert.equal(tools.find(tool => tool.name === "task").annotations.readOnlyHint, false);
   assert.equal(tools.find(tool => tool.name === "task").annotations.destructiveHint, true);
-  assert.equal(tools.find(tool => tool.name === "run_workflow").annotations.idempotentHint, false);
   const taskOutput = new AjvJsonSchemaValidator().getValidator(tools.find(tool => tool.name === "task").outputSchema);
   const result = { status: "succeeded", task_ref: { kind: "parse", id: "parse-1" },
     data: { task_id: "parse-1", response_type: "recognize", status: 4 } };
@@ -143,9 +140,10 @@ test("stdio registers the nine Node tools and delivers the guide without a key",
   assert.equal(taskOutput({ ...workflowResult, usage: { billing_breakdown: { unexpected_category: 0.5 } } }).valid, false);
   const guide = await call(client, "get_adp_guide");
   assert.match(guide.structuredContent.markdown, /国内通用票据/);
-  for (const id of [domesticBill, overseasFast, "financial_report_extraction", "finance_payable", "expense_reimbursement"]) {
+  for (const id of [domesticBill, overseasFast]) {
     assert.ok(guide.structuredContent.markdown.includes(id), id);
   }
+  assert.doesNotMatch(guide.structuredContent.markdown, /run_workflow|template_key|wftp_app_|financial_report_extraction|finance_payable|expense_reimbursement/);
   assert.equal(guide.content[0].text, guide.structuredContent.markdown);
   assert.match(guide.content[0].text, /adp\.laiye\.com\?from=getkey&utm_source=github/);
   assert.match(guide.content[0].text, /adp-global\.laiye\.com\?from=getkey&utm_source=github/);
@@ -161,6 +159,7 @@ test("the guide follows the configured language and accepts a legacy override", 
   }, "", { ADP_ACCEPT_LANGUAGE: "en-US" });
   const english = await call(client, "get_adp_guide");
   assert.match(english.structuredContent.markdown, /Global invoices and receipts/);
+  assert.doesNotMatch(english.structuredContent.markdown, /run_workflow|template_key|wftp_app_|financial_report_extraction|finance_payable|expense_reimbursement/);
   const chinese = await call(client, "get_adp_guide", { language: "zh-CN" });
   assert.match(chinese.structuredContent.markdown, /国内通用票据/);
   assert.equal(calls.length, 0);
@@ -299,12 +298,11 @@ test("domestic preset preserves the per-request invoice verification override", 
   assert.ok(calls.every(item => item.source === "npm-mcp"));
 });
 
-test("uploads local bytes, maps fields and workflow keys, and calls classification only", async t => {
+test("uploads local bytes, maps custom fields, and calls classification only", async t => {
   const { client, calls } = await connect(t, ({ path }) => {
     switch (path) {
       case `${workflowPrefix}/files/upload`: return ok({ download_url: fileUrl });
       case `${documentPrefix}/extract/direct-fast`: return ok({ extraction_result: [{ name: "发票号码", value: "123" }] });
-      case `${workflowPrefix}/v1/app/run/create/task`: return ok({ run_id: "run-1" });
       case `${documentPrefix}/classify/create/task`: return ok({ task_id: "classify-1" });
       case `${documentPrefix}/classify/query/task/classify-1`:
         return ok({ task_id: "classify-1", status: "success", segments: [{ category_name: "票据", pages: [1] }] });
@@ -332,77 +330,48 @@ test("uploads local bytes, maps fields and workflow keys, and calls classificati
   const invalid = await call(client, "extract_custom_document", { file_url: fileUrl, fields, app_id: domesticBill });
   assert.equal(invalid.isError, true);
   assert.equal(calls.length, 2);
-  const workflow = await call(client, "run_workflow", {
-    template_key: "financial_report_extraction", wait: false, files: [{ url: fileUrl }]
-  });
-  assert.deepEqual(workflow.structuredContent.task_ref, { kind: "workflow", id: "run-1" });
-  assert.equal(calls[2].body.application_id, "wftp_app_y6p2m8q4v1c9t3x7n5r0h2k6");
-  assert.equal(calls[2].body.files[0].url, fileUrl);
-  assert.ok(!("release_version_id" in calls[2].body));
   const classified = await call(client, "route_document", { app_id: "owned-classifier", file_url: fileUrl });
   assert.equal(classified.structuredContent.status, "succeeded");
-  assert.equal(calls[3].body.app_id, "owned-classifier");
+  assert.equal(calls[2].body.app_id, "owned-classifier");
   assert.deepEqual(classified.structuredContent.data.segments[0].pages, [1]);
   const localUri = pathToFileURL(file).href;
   const mixed = await call(client, "upload_temporary_file", { file_path: localUri, files: [{}] });
   assert.equal(mixed.isError, true);
-  assert.equal(calls.length, 5);
+  assert.equal(calls.length, 4);
   const fileArray = await call(client, "upload_temporary_file", { files: [{ file_path: localUri }] });
   assert.equal(fileArray.structuredContent.files[0].data.download_url, fileUrl);
-  assert.match(calls[5].body, /ADP multipart test/);
+  assert.match(calls[4].body, /ADP multipart test/);
   const customArray = await call(client, "extract_custom_document", { files: [{ url: fileUrl }], fields });
   assert.equal(customArray.structuredContent.files[0].status, "succeeded");
-  assert.deepEqual(calls[6].body, { file: { url: fileUrl }, fields });
+  assert.deepEqual(calls[5].body, { file: { url: fileUrl }, fields });
 });
 
-test("official workflow validates opaque file references and uses upload receipt metadata", async t => {
-  const { client, calls } = await connect(t, () => ok({ run_id: "run-1" }));
-  const input = { template_key: "finance_payable", wait: false };
-  const url = "https://example.invalid/files/1234";
-  const withoutName = await call(client, "run_workflow", { ...input, files: [{ url }] });
-  assert.equal(withoutName.isError, true);
-  assert.match(withoutName.structuredContent.error.message, /name/);
-  const unsupportedInputs = await call(client, "run_workflow", {
-    ...input, files: [{ url, name: "invoice.pdf" }], inputs: { query: "unused" }
+test("removed workflow runner is rejected without any business request", async t => {
+  const { client, calls } = await connect(t, () => {
+    throw new Error("Unexpected upstream request");
   });
-  assert.equal(unsupportedInputs.isError, true);
+  const removed = await call(client, "run_workflow", { files: [{ url: fileUrl }], wait: false });
+  assert.equal(removed.isError, true);
+  assert.equal(removed.structuredContent.status, "failed");
   assert.equal(calls.length, 0);
-  const accepted = await call(client, "run_workflow", {
-    ...input, files: [{ url, name: "invoice.pdf" }], inputs: {}
-  });
-  assert.deepEqual(accepted.structuredContent.task_ref, { kind: "workflow", id: "run-1" });
-  assert.equal(calls.length, 1);
-  assert.deepEqual(calls[0].body.files, [{ url, name: "invoice.pdf", mime_type: "application/pdf" }]);
-  assert.equal(Object.hasOwn(calls[0].body, "inputs"), false);
-  const explicit = await call(client, "run_workflow", {
-    ...input, files: [{ url, name: "invoice.jpg", mime_type: "image/jpeg" }]
-  });
-  assert.equal(explicit.isError ?? false, false);
-  assert.equal(calls.length, 2);
-  assert.deepEqual(calls[1].body.files, [{ url, name: "invoice.jpg", mime_type: "image/jpeg" }]);
 });
 
-test("workflow polling and direct task queries return the model usage billing breakdown", async t => {
+test("existing workflow task queries return the model usage billing breakdown", async t => {
   const usage = { credits_consumed: 2.5, billing_breakdown: { extraction: 1, model_usage: 1.5 } };
   const { client, calls } = await connect(t, ({ method, path }) => {
-    if (method === "POST" && path === `${workflowPrefix}/v1/app/run/create/task`) {
-      return ok({ run_id: "run-1", status: "pending" });
-    }
     if (method === "GET" && path === `${workflowPrefix}/v1/app/run/query/task/run-1`) {
       return { ...ok({ run_id: "run-1", status: "succeeded", output: {} }), usage };
     }
     throw new Error("Unexpected endpoint");
   });
-  const run = (await call(client, "run_workflow", {
-    template_key: "finance_payable", files: [{ url: fileUrl }]
-  })).structuredContent;
-  const queried = (await call(client, "task", { task_ref: run.task_ref })).structuredContent;
-  for (const result of [run, queried]) {
+  const ref = { kind: "workflow", id: "run-1" };
+  for (const args of [{ task_ref: ref }, { run_id: ref.id }]) {
+    const result = (await call(client, "task", args)).structuredContent;
     assert.equal(result.status, "succeeded");
     assert.equal(result.usage_status, "available");
     assert.deepEqual(result.usage, usage);
   }
-  assert.deepEqual(calls.map(item => item.method), ["POST", "GET", "GET"]);
+  assert.deepEqual(calls.map(item => item.method), ["GET", "GET"]);
 });
 
 test("wait timeout keeps the accepted task reference without submitting again", async t => {

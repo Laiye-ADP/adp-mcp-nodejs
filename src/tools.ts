@@ -1,14 +1,13 @@
 import { setTimeout as delay } from "node:timers/promises";
-import { extname } from "node:path";
 import type { JsonSchemaType, JsonSchemaValidator } from "@modelcontextprotocol/sdk/validation";
 import { AjvJsonSchemaValidator } from "@modelcontextprotocol/sdk/validation/ajv";
-import { AdpApiError, mimeTypeFor, type AdpClient, type AdpRegion, type JsonObject } from "./adp-client.js";
-import { batchConcurrency, batchLimit, defaultWaitSeconds, domesticBillsAppId, getGuide, parseAppId, presetExtractionIds, workflowTemplateIds } from "./guide.js";
+import { AdpApiError, type AdpClient, type AdpRegion, type JsonObject } from "./adp-client.js";
+import { batchConcurrency, batchLimit, defaultWaitSeconds, domesticBillsAppId, getGuide, parseAppId, presetExtractionIds } from "./guide.js";
 import { resultSchemas } from "./result-schema.js";
 
 type TaskKind = "parse" | "extract" | "classify" | "workflow";
 type TaskRef = { kind: TaskKind; id: string };
-type FileReference = { url: string; name?: string; mime_type?: string };
+type FileReference = { url: string; name?: string };
 type ResultStatus = "pending" | "succeeded" | "failed" | "cancelled" | "partial_success";
 type ScheduleRequest = <T>(request: () => Promise<T>) => Promise<T>;
 type WaitStatus = "paused" | "timeout" | "query_failed";
@@ -44,11 +43,6 @@ const customDocumentFile = objectSchema({ url: fileUrl }, ["url"]);
 const localFile = objectSchema({
   file_path: { ...requiredText, description: "本机可读取的文件路径，支持绝对路径或 file:/// 地址。" }
 }, ["file_path"]);
-const workflowFile = objectSchema({
-  url: fileUrl,
-  name: { ...requiredText, description: "使用上传回执的 file_name。URL 不含可识别文件名时必填。" },
-  mime_type: { ...requiredText, description: "使用上传回执的 content_type。能从文件名推断时可省略。" }
-}, ["url"]);
 const waitProperties: Record<string, Schema> = {
   wait: { type: "boolean", default: true, description: "默认等待；false 在提交完成后立即返回任务引用，随后用 task 查询。" },
   wait_timeout_seconds: { type: "integer", minimum: 1, maximum: 900, default: defaultWaitSeconds,
@@ -62,7 +56,7 @@ function buildTools(region: AdpRegion) {
   return [
     {
       name: "get_adp_guide", title: "获取引导说明文档",
-      description: "获取与当前 MCP 连接版本和区域对应的 ADP 引导说明。正文包含预制应用名称与 app_id 对照表、文件上传步骤、官方工作流说明和调用示例。",
+      description: "获取与当前 MCP 连接版本和区域对应的 ADP 引导说明。正文包含预制应用名称与 app_id 对照表、文件上传步骤和文档处理调用示例。",
       inputSchema: objectSchema({}),
       annotations: { ...readOnly, openWorldHint: false },
       outputSchema: output.get_adp_guide
@@ -124,17 +118,6 @@ function buildTools(region: AdpRegion) {
       }, ["fields"], customDocumentFile),
       annotations: submit,
       outputSchema: output.extract_custom_document
-    },
-    {
-      name: "run_workflow", title: "运行官方工作流",
-      description: "用 template_key 直接启动金融财报、财务应付或费用报销。将同一笔业务的材料放入同一个 files 数组。已上传的文件优先使用回执中的下载地址、文件名和类型。",
-      inputSchema: objectSchema({
-        template_key: { type: "string", enum: Object.keys(workflowTemplateIds) },
-        files: { ...arraySchema(workflowFile), description: `同一次运行的 1–${batchLimit} 份材料。每项可用上传回执的 download_url、file_name、content_type 填写 url、name、mime_type。` },
-        ...waitProperties
-      }, ["template_key", "files"]),
-      annotations: submit,
-      outputSchema: output.run_workflow
     },
     {
       name: "route_document", title: "按文种分类",
@@ -227,13 +210,6 @@ export async function callTool(
     if (!presetExtractionIds[region].has(appId)) throw new Error("请选择 get_adp_guide 中当前区域的预制抽取 app_id。");
     args = { ...args, app_id: appId };
   }
-  if (name === "run_workflow" && args.inputs !== undefined) {
-    const { inputs, ...options } = args;
-    if (!isObject(inputs) || Object.keys(inputs).length) {
-      throw new Error("官方工作流通过 files 接收材料，请省略 inputs。");
-    }
-    args = options;
-  }
   const single = args.file_path !== undefined || args.file_url !== undefined ? validators.single : undefined;
   if (single && args.files !== undefined) {
     throw new Error("请只传 files。旧版单文件参数不能与 files 同时使用。");
@@ -285,24 +261,6 @@ export async function callTool(
         status: "succeeded", data: { id: data.id, created_at: data.created_at },
         next_steps: [{ message: "反馈已受理，请保存 data.id 作为反馈编号。" }]
       };
-    }
-    case "run_workflow": {
-      const key = args.template_key as keyof typeof workflowTemplateIds;
-      const files = (args.files as FileReference[]).map((file) => {
-        const url = normalizeFileUrl(file.url);
-        const urlName = filenameFromUrl(url);
-        const name = file.name?.trim() ?? urlName;
-        if (!file.name && !extname(urlName)) {
-          throw new Error("无法从文件 URL 判断文件名，请将上传回执的 file_name 填入 files[].name。");
-        }
-        const mimeType = file.mime_type?.trim() ?? mimeTypeFor(name);
-        if (!file.mime_type && mimeType === "application/octet-stream") {
-          throw new Error("无法从文件名判断文件类型，请将上传回执的 content_type 填入 files[].mime_type。");
-        }
-        return { url, name, mime_type: mimeType };
-      });
-      const submitted = await createTask("workflow", { application_id: workflowTemplateIds[key], files }, client, signal);
-      return waitForTask(submitted, args, client, signal);
     }
     case "extract_custom_document": {
       const fields = args.fields as { name: string; prompt?: string }[];
@@ -379,12 +337,6 @@ function normalizeFileUrl(value: string): string {
   throw new Error("文件必须使用可访问的 HTTP(S) URL。本地文件请先用 upload_temporary_file 上传。");
 }
 
-function filenameFromUrl(url: string): string {
-  const filename = new URL(url).pathname.split("/").pop();
-  if (!filename) return "document";
-  try { return decodeURIComponent(filename); } catch { return filename; }
-}
-
 function documentBody(file: FileReference): JsonObject {
   return { file_url: file.url, ...(file.name === undefined ? {} : { file_name: file.name }) };
 }
@@ -442,7 +394,7 @@ async function uploadFiles(args: JsonObject, client: AdpClient, signal?: AbortSi
       }
       return {
         status: "succeeded", data,
-        next_steps: [{ message: "将本项 data.download_url 填入后续工具的 files[].url。运行工作流时用 data.file_name 和 data.content_type 填写 name 和 mime_type。" }]
+        next_steps: [{ message: "将本项 data.download_url 填入后续工具的 files[].url。" }]
       };
     } catch (error) {
       if (signal?.aborted) throw error;
@@ -493,7 +445,7 @@ function taskPath(kind: TaskKind, suffix: string, client: AdpClient): string {
 }
 
 async function createTask(
-  kind: TaskKind, body: JsonObject, client: AdpClient, signal?: AbortSignal
+  kind: Exclude<TaskKind, "workflow">, body: JsonObject, client: AdpClient, signal?: AbortSignal
 ): Promise<JsonObject> {
   try {
     const envelope = await client.request(taskPath(kind, "/create/task", client), { method: "POST", body, signal });

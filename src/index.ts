@@ -14,7 +14,7 @@ const server = new Server(
   { name: "laiye-adp-mcp-nodejs-v2", version },
   {
     capabilities: { tools: {} },
-    instructions: "Use get_adp_guide for preset IDs and workflow examples. Follow next_steps when available. Use task with the original task_ref to query a task or explicitly cancel an unclaimed pending document task. Workflows support queries only."
+    instructions: "Use get_adp_guide for preset IDs and document processing examples. Follow next_steps when available. Use task with the original task_ref to query a task or explicitly cancel an unclaimed pending document task. Existing workflow runs support queries only."
   }
 );
 

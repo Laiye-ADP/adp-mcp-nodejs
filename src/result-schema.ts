@@ -63,7 +63,6 @@ export function resultSchemas(taskReference: ObjectSchema) {
     extract_custom_document: toolResult({
       data: dataFields({ extraction_result: array }, ["extraction_result"])
     }, ["data"], meteredBatch),
-    run_workflow: toolResult({ data: workflowData }, ["data"], { usage: workflowUsage, task: true }),
     route_document: toolResult({ data: classifyData }, ["data"], taskBatch),
     task: {
       ...toolResult({ data: openObject, action: { type: "string", enum: ["query", "cancel"] } }, ["data"], { usage: openObject, task: true }),

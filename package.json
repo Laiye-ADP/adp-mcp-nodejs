@@ -1,7 +1,7 @@
 {
   "name": "@laiye-adp/mcp",
   "version": "2.0.0-beta.2",
-  "description": "Laiye ADP MCP server for document processing and official workflows",
+  "description": "Laiye ADP MCP server for document processing",
   "type": "module",
   "bin": {
     "laiye-adp-mcp": "dist/index.js"

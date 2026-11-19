@@ -35,12 +35,6 @@ export const defaultWaitSeconds = 60;
 export const batchLimit = 20;
 export const batchConcurrency = 3;
 
-export const workflowTemplateIds = {
-  financial_report_extraction: "wftp_app_y6p2m8q4v1c9t3x7n5r0h2k6",
-  finance_payable: "wftp_app_n8q4v2m7x5p1r9t6c3a0b8d2",
-  expense_reimbursement: "wftp_app_h3k9s1v6p4x8q2m7c5t0a9r1"
-} as const;
-
 export function getGuide(version: string, language: string, region: AdpRegion, regionConfirmed = true): string {
   const english = /^en(?:[-_]|$)/i.test(language);
   const global = region === "global";
@@ -67,8 +61,7 @@ ${regionNote}
 - \`extract_document\` extracts a known document type with a preset. For a global invoice, pass \`{"app_id":"ootb_r3s6t9u2v5w8x1y4z7a0b3c6d9e2","files":[{"url":"https://example.com/invoice.pdf"}]}\`.
 - \`extract_custom_document\` extracts fields specified for this call. For example, pass \`{"files":[{"url":"https://example.com/report.pdf"}],"fields":[{"name":"Reporting period"}]}\`. Each of the 1–20 fields needs a unique \`name\` and can include a \`prompt\`.
 - \`route_document\` takes \`files\` and the \`app_id\` of an existing classification app. Use the ID saved when the classification app was created. It returns document types, original page numbers, and unclassified pages. Optional \`pages\` limits the original page numbers to classify. [Classification app setup](https://adp-doc.laiye.com/en/api-reference/adp-api/document-classification/overview)
-- \`run_workflow\` takes a \`template_key\` and all files for one run. For example, pass \`{"template_key":"financial_report_extraction","files":[{"url":"https://example.com/report.pdf","name":"report.pdf","mime_type":"application/pdf"}]}\`. After uploading, use \`download_url\` as \`url\`, \`file_name\` as \`name\`, and \`content_type\` as \`mime_type\`. Include the filename and type when the URL has no file extension.
-- \`task\` queries or cancels an existing task. Query is the default action. For parsing, preset extraction, or classification, copy \`files[i].task_ref\` from the result for the file you want. For workflows, copy the top-level \`task_ref\`. Pass the whole reference, for example \`{"task_ref":{"kind":"parse","id":"task-id-from-result"}}\`. You can also copy the \`arguments\` from a \`task\` entry in \`next_steps\`.
+- \`task\` queries or cancels an existing task. Query is the default action. For parsing, preset extraction, or classification, copy \`files[i].task_ref\` from the result for the file you want. For an existing workflow run, pass its \`run_id\`. Pass the whole reference, for example \`{"task_ref":{"kind":"parse","id":"task-id-from-result"}}\`. You can also copy the \`arguments\` from a \`task\` entry in \`next_steps\`.
 - \`submit_user_feedback\` submits a product issue or suggestion and returns the feedback ID.
 
 ## Preset applications
@@ -87,26 +80,16 @@ Set \`with_rec_result: true\` when you need the parsing result from a preset tha
 - \`agentic_v2\` (Smart parsing 2.0) for documents with complex layouts, tables, or formulas.
 - \`thai_ocr\` (Thai-first mode) for documents primarily in Thai.
 
-## Official workflows
-
-${global ? "Global does not offer new runs from the official template catalog. If your account already has a published application for a template, you can use its corresponding key below.\n\n" : ""}\
-| Workflow | template_key | Fixed application_id |
-| --- | --- | --- |
-| Financial report extraction | \`financial_report_extraction\` | \`${workflowTemplateIds.financial_report_extraction}\` |
-| Accounts payable | \`finance_payable\` | \`${workflowTemplateIds.finance_payable}\` |
-| Expense reimbursement | \`expense_reimbursement\` | \`${workflowTemplateIds.expense_reimbursement}\` |
-
 ## File limits and concurrency
 
 - Upload, parsing, preset extraction, custom extraction, and classification tools accept 1–${batchLimit} files per call. Each call handles files individually and allows up to ${batchConcurrency} OpenAPI requests in flight, including submissions and polling. Each file has its own result in \`files\`, in input order.
-- \`run_workflow\` submits 1–${batchLimit} files together in a single run.
 - ADP applies account processing concurrency and request rate limits separately. [Rate limits, concurrency, and timeouts](https://adp-doc.laiye.com/en/api-reference/rate-limits)
 
 ## Waiting and credits
 
 For parsing, preset extraction, and classification, omit \`pages\` or pass \`[]\` to process all pages. Pass original page numbers such as \`[2, 4]\` where page selection is supported.
 
-Parsing, preset extraction, classification, and workflows wait up to ${defaultWaitSeconds} seconds by default. Set \`wait: false\` to get the task reference after submission, or \`wait_timeout_seconds\` to adjust the wait. When the wait ends before completion, call \`task\` with the original \`task_ref\`. Custom extraction returns a synchronous result.
+Parsing, preset extraction, and classification wait up to ${defaultWaitSeconds} seconds by default. Set \`wait: false\` to get the task reference after submission, or \`wait_timeout_seconds\` to adjust the wait. When the wait ends before completion, call \`task\` with the original \`task_ref\`. Custom extraction returns a synchronous result.
 
 For \`task\`, provide exactly one identifier form: \`task_ref\`, a workflow \`run_id\`, or a document \`task_id\` together with \`task_type\` (\`parse\`, \`extract\`, or \`classify\`). For example, \`{"task_id":"task-id-from-result","task_type":"extract"}\` queries an extraction task. To cancel a document task, use \`{"action":"cancel","task_ref":{"kind":"extract","id":"task-id-from-result"}}\`. Only unclaimed pending document tasks can be cancelled. Workflows support queries only. A successful cancellation returns \`action: "cancel"\` and \`status: "succeeded"\`; inspect \`data.status\` for the actual task state. If cancellation is refused, the original state remains in \`data\`. Querying a cancelled task returns \`status: "cancelled"\` without a tool error. Query and cancellation keep the original task reference and never submit a new task.
 
@@ -139,8 +122,7 @@ ${regionNote}
 - \`extract_document\` 用预制应用抽取已知文种的业务字段。海外发票示例为 \`{"app_id":"ootb_r3s6t9u2v5w8x1y4z7a0b3c6d9e2","files":[{"url":"https://example.com/invoice.pdf"}]}\`。
 - \`extract_custom_document\` 按本次指定的字段抽取。可以传入 \`{"files":[{"url":"https://example.com/report.pdf"}],"fields":[{"name":"报告期间"}]}\`。\`fields\` 支持 1–20 项，每项的 \`name\` 必填且不可重复，可选 \`prompt\`。
 - \`route_document\` 传入 \`files\` 和已有分类应用的 \`app_id\`。使用创建分类应用时保存的 ID。工具返回识别出的文种、原始页码和未分类页。可用 \`pages\` 指定要分类的原始页码。 [创建分类应用](https://adp-doc.laiye.com/api-reference/adp-api/document-classification/overview)
-- \`run_workflow\` 按 \`template_key\` 运行官方工作流，将同一次运行的材料放入 \`files\`。金融财报可传 \`{"template_key":"financial_report_extraction","files":[{"url":"https://example.com/report.pdf","name":"report.pdf","mime_type":"application/pdf"}]}\`。上传后用回执中的 \`download_url\` 填 \`url\`、\`file_name\` 填 \`name\`、\`content_type\` 填 \`mime_type\`。文件地址无扩展名时请补全文件名和类型。
-- \`task\` 查询或取消已提交的任务，默认查询。解析、常见文档抽取和分类从响应中对应文件的 \`files[i].task_ref\` 取引用，工作流取顶层 \`task_ref\`。原样传入整个引用，例如 \`{"task_ref":{"kind":"parse","id":"task-id-from-result"}}\`。如果响应的 \`next_steps\` 中有 \`task\`，可以直接复制该步骤的 \`arguments\`。
+- \`task\` 查询或取消已提交的任务，默认查询。解析、常见文档抽取和分类从响应中对应文件的 \`files[i].task_ref\` 取引用，已有工作流运行可直接传 \`run_id\` 查询。原样传入整个引用，例如 \`{"task_ref":{"kind":"parse","id":"task-id-from-result"}}\`。如果响应的 \`next_steps\` 中有 \`task\`，可以直接复制该步骤的 \`arguments\`。
 - \`submit_user_feedback\` 提交使用问题或改进建议，成功后返回反馈编号。
 
 ## 预制应用名称和 ID
@@ -159,26 +141,16 @@ ${global ? "" : "国内通用票据支持用 `enable_invoice_verify` 为本次�
 - \`agentic_v2\`（智能解析 2.0）适用于含复杂版式、表格或公式的文档。
 - \`thai_ocr\`（泰语优先模式）适用于以泰语为主的文档。
 
-## 官方工作流
-
-${global ? "全球区暂未开放从官方模板新建运行所需的应用。账号下已有对应的已发布应用时，可使用下表的模板键运行。\n\n" : ""}\
-| 工作流 | template_key | 固定 application_id |
-| --- | --- | --- |
-| 金融财报 | \`financial_report_extraction\` | \`${workflowTemplateIds.financial_report_extraction}\` |
-| 财务应付 | \`finance_payable\` | \`${workflowTemplateIds.finance_payable}\` |
-| 费用报销 | \`expense_reimbursement\` | \`${workflowTemplateIds.expense_reimbursement}\` |
-
 ## 文件数量与并发
 
 - 上传、解析、预制抽取、自定义抽取和分类每次可传 1–${batchLimit} 份文件。每次调用逐文件发起请求，提交和轮询最多同时有 ${batchConcurrency} 个 OpenAPI 请求在途。响应 \`files\` 按输入顺序逐项返回结果。
-- \`run_workflow\` 每次可传 1–${batchLimit} 份材料，整组提交为一次工作流运行。
 - ADP 另行限制账号处理并发和请求速率。 [速率、并发与超时](https://adp-doc.laiye.com/api-reference/rate-limits)
 
 ## 等待方式与积分
 
 解析、常见文档抽取和分类的 \`pages\` 都是选填，省略或传 \`[]\` 时处理全部页面。支持按页码筛选时，传 \`[2, 4]\` 可处理原文档的第 2、4 页。
 
-解析、预制抽取、分类和工作流默认最多等待 ${defaultWaitSeconds} 秒。设置 \`wait: false\` 可在提交后获取任务引用，或用 \`wait_timeout_seconds\` 调整等待上限。达到上限时用原 \`task_ref\` 调用 \`task\` 续查。自定义抽取返回同步结果。
+解析、预制抽取和分类默认最多等待 ${defaultWaitSeconds} 秒。设置 \`wait: false\` 可在提交后获取任务引用，或用 \`wait_timeout_seconds\` 调整等待上限。达到上限时用原 \`task_ref\` 调用 \`task\` 续查。自定义抽取返回同步结果。
 
 \`task\` 的任务标识三选一：\`task_ref\`、工作流 \`run_id\`，或文档 \`task_id\` 与 \`task_type\`（\`parse\`、\`extract\`、\`classify\`）。例如 \`{"task_id":"task-id-from-result","task_type":"extract"}\` 查询抽取任务。取消文档任务时传 \`{"action":"cancel","task_ref":{"kind":"extract","id":"task-id-from-result"}}\`。仅可取消尚未被领取的待执行文档任务，工作流仅支持查询。取消成功返回 \`action: "cancel"\`、\`status: "succeeded"\`，任务实际状态看 \`data.status\`；未取消时也会在 \`data\` 保留实际状态。查询已取消任务返回 \`status: "cancelled"\`，不视为工具错误。查询和取消均保留原任务引用，不重新提交任务。
 
