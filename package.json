@@ -9,23 +9,25 @@
   "files": [
     "dist",
     "catalog",
-    "README.md"
+    "README.md",
+    "README_CN.md"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "npm run typecheck && node scripts/build.mjs",
+    "prepack": "npm run build",
     "start": "node dist/index.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "npm run build && node --test test/node-mcp.test.mjs",
+    "test:package": "node --test test/packed-cli.test.mjs",
     "catalog:generate": "node scripts/generate-tool-catalog.mjs",
     "catalog:check": "node scripts/generate-tool-catalog.mjs --check"
   },
-  "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.32.2",
-    "ajv": "^8.20.0",
-    "ajv-formats": "^3.0.1"
-  },
   "devDependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.2",
     "@types/node": "^20.19.0",
+    "ajv": "^8.20.0",
+    "ajv-formats": "^3.0.1",
+    "esbuild": "0.28.2",
     "typescript": "^5.8.0"
   },
   "engines": {
