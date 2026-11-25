@@ -1,10 +1,14 @@
 # 来也 ADP MCP · Node.js
 
+[中文快速接入](#快速接入) · [English quick start](#english-quick-start)
+
 在支持 MCP stdio 的客户端处理本地或线上文档。可上传文件、解析全文、抽取字段和按文档类型分类。按文档类型查找预置或自定义应用可使用 `list_apps`。`get_adp_guide` 帮助选择全文解析、一次性字段抽取或可复用的抽取规则。
 
 ## 快速接入
 
-需要 Node.js 20+。把下面的配置加入 MCP 客户端，用现有 API Key 替换占位值并连接。连接后用 `tools/list` 查看当前连接的工具目录。
+需要 Node.js 20+ 和 ADP API Key。[获取中国区 Key](https://adp.laiye.com?from=getkey&utm_source=github) · [获取全球区 Key](https://adp-global.laiye.com?from=getkey&utm_source=github)
+
+把下面的配置加入支持 stdio 的 MCP 客户端，用现有 API Key 替换占位值并连接。连接后用 `tools/list` 查看当前连接的工具目录。
 
 ```json
 {
@@ -21,13 +25,38 @@
 }
 ```
 
-如果已在同一台机器、同一系统账号下用 `adp config set` 保存凭据，从示例中移除 `ADP_API_KEY`，即可复用 CLI 保存的 Key、地址和租户。使用客户端的凭据管理功能保存实际 Key。 [获取中国区 Key](https://adp.laiye.com?from=getkey&utm_source=github) · [获取全球区 Key](https://adp-global.laiye.com?from=getkey&utm_source=github)
+这份配置使用 npm 上已发布的 Beta 包。测试当前仓库代码时，请按[从源码运行](#从源码运行)配置本地入口。
+
+如果已在同一台机器、同一系统账号下用 `adp config set` 保存凭据，从示例中移除 `ADP_API_KEY`，即可复用 CLI 保存的 Key、地址和租户。使用客户端的凭据管理功能保存实际 Key。
 
 ### 区域与连接
 
-- 公有云仅配置 Key 时，优先复用 CLI 为同一个 Key 保存的公有云地址和租户。否则，默认租户 `laiye` 首次通过只读鉴权识别区域。先检查中国区，只有收到 `404 Accessor not found` 才检查全球区。成功后同一 MCP 进程复用该结果。识别过程无需查积分或提交业务任务。
-- 可用 `ADP_REGION=cn` 或 `ADP_REGION=global` 直接选择官方区域，也可用 `ADP_API_BASE_URL` 指定服务根地址。专有部署同时设置 `ADP_TENANT_NAME`。未显式传 Key 时，连接配置须与保存的 CLI 配置匹配。
-- `ADP_ACCEPT_LANGUAGE` 控制工具显示名称、描述、参数说明、指南和业务响应的语言。需要指定区域时，显式设置 `ADP_REGION`。 [连通性与鉴权自检](https://adp-doc.laiye.com/api-reference/troubleshooting)
+| 环境变量 | 用途 |
+| --- | --- |
+| `ADP_API_KEY` | ADP API Key。省略时尝试复用同一系统账号的 ADP CLI 凭据。 |
+| `ADP_REGION` | `cn` 或 `global`，选择官方公有云区域。只提供 Key 时可自动识别区域。 |
+| `ADP_API_BASE_URL` | 指定服务根地址，适用于专有部署。 |
+| `ADP_TENANT_NAME` | 指定实际租户。专有部署请与服务地址一起配置。 |
+| `ADP_ACCEPT_LANGUAGE` | 默认 `zh`；`en` 或 `en-US` 返回英文工具显示名称、描述、参数说明、指南和业务响应。语言与区域分别配置。 |
+
+未显式传 Key 时，连接配置须与保存的 CLI 配置匹配。[连通性与鉴权自检](https://adp-doc.laiye.com/api-reference/troubleshooting)
+
+<details>
+<summary>自动区域识别</summary>
+
+公有云仅配置 Key 时，优先复用 CLI 为同一个 Key 保存的公有云地址和租户。否则，默认租户 `laiye` 首次通过只读鉴权识别区域。先检查中国区，只有收到 `404 Accessor not found` 才检查全球区。成功后同一 MCP 进程复用该结果。识别过程无需查积分或提交业务任务。
+
+</details>
+
+## 开始使用
+
+连接后可以直接向 AI 助手描述任务。
+
+- “把这份合同的正文和表格解析出来，供后续翻译。”
+- “从这些收据提取商家、金额和币种，汇总成表格。”
+- “判断这份 PDF 包含哪些材料，标出各类材料所在的原始页码。”
+
+处理本地文件时，提供 AI 助手可读取的完整路径，例如 `D:/Documents/contract.pdf`。也可提供 ADP 能下载的 HTTP(S) 地址。
 
 ## 从文件到结果
 
@@ -57,6 +86,11 @@
 
 ## 工具目录
 
+完整工具说明及必填参数由当前工具定义生成，也可在连接后通过 `tools/list` 查看。
+
+<details>
+<summary>查看完整工具目录</summary>
+
 <!-- tool-catalog:start -->
 
 版本 `2.0.0-beta.2`，下表列出两区通用的 **14** 个工具。区域专属工具和参数以当前连接的工具定义为准。
@@ -80,14 +114,37 @@
 
 <!-- tool-catalog:end -->
 
+</details>
+
 ## 从源码运行
 
-在包目录执行 `npm ci`、`npm run build`，再将客户端配置中的 `command` 设为 `node`，`args` 设为本地 `dist/index.js` 的绝对路径。运行 `npm test` 验证工具行为，使用 `npm run catalog:generate` 和 `npm run catalog:check` 更新并核对工具表。上方 `npx` 示例运行 npm 上已发布的 Beta 版本。
+在包目录执行 `npm ci`、`npm run build`，再将客户端配置中的 `command` 设为 `node`，`args` 设为本地 `dist/index.js` 的绝对路径。运行 `npm test` 验证工具行为，使用 `npm run catalog:generate` 和 `npm run catalog:check` 更新并核对工具表。
 
 ## English quick start
 
-Use Node.js 20+ and the stdio configuration above. Set `ADP_ACCEPT_LANGUAGE=en` for English tool titles, descriptions, parameter help, the guide, and API responses. Provide an API key, or use the credentials saved by ADP CLI on the same machine and OS account. Use `ADP_REGION` or `ADP_API_BASE_URL` to select a deployment explicitly.
+Use Node.js 20+ and an ADP API key. Get a key for your account's deployment from the [China workspace](https://adp.laiye.com?from=getkey&utm_source=github) or [Global workspace](https://adp-global.laiye.com?from=getkey&utm_source=github), then add this configuration to a stdio-compatible MCP client.
+
+```json
+{
+  "mcpServers": {
+    "laiye-adp": {
+      "command": "npx",
+      "args": ["-y", "--package=@laiye-adp/mcp@beta", "laiye-adp-mcp"],
+      "env": {
+        "ADP_API_KEY": "<your-existing-api-key>",
+        "ADP_ACCEPT_LANGUAGE": "en"
+      }
+    }
+  }
+}
+```
+
+This installs the published npm Beta. To test the current checkout, run `npm ci` and `npm run build`, then set `command` to `node` and `args` to the absolute path of `dist/index.js`.
+
+Omit `ADP_API_KEY` to reuse ADP CLI credentials saved by the same machine and OS account. Use `ADP_REGION=cn` or `global` for an official cloud region, or `ADP_API_BASE_URL` and `ADP_TENANT_NAME` for a private deployment. Language is independent of the deployment region.
+
+Try a request such as “Extract the vendor, amount, and currency from these receipts and summarize them in a table.” For a local document, give the assistant a readable absolute path, such as `D:/Documents/contract.pdf`.
 
 Use `get_adp_guide` to choose an approach, `list_apps` to find accessible apps and `get_app` for configuration details. Upload local files with `upload_file` or provide a downloadable URL. Each call to `parse_document`, `extract_document` or `classify_document` processes one document. In either extraction mode, supply `file_url` or `file_base64`. Add `fields` for a one-off extraction or `app_id` to run an extraction app. Parsing, app-based extraction, and classification return the final result in the same call by default. The synchronous HTTP timeout defaults to 60 seconds and can be set using `wait_timeout_seconds`. If it expires, the processing outcome is unknown. Use `wait=false` to create a background task and pass its top-level `task_ref` to `get_task`. Use `cancel_task` for an unclaimed queued document task.
 
-To test the local source, build it and point your MCP client's stdio command at the resulting `dist/index.js`. [Connectivity and authentication](https://adp-doc.laiye.com/en/api-reference/troubleshooting) · [Rate limits, concurrency and timeouts](https://adp-doc.laiye.com/en/api-reference/rate-limits)
+[Connectivity and authentication](https://adp-doc.laiye.com/en/api-reference/troubleshooting) · [Rate limits, concurrency and timeouts](https://adp-doc.laiye.com/en/api-reference/rate-limits)
