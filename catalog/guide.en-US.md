@@ -98,13 +98,41 @@ These are service defaults. The deployment configuration determines the actual a
 - **Limit in-flight work.** When the allowance is unknown, start with at most five in-flight documents of each processing type, including submitted documents that are still queued. Add another when one finishes. Reduce this number when the account has other tasks or reports insufficient concurrency.
 - **Control request frequency.** Both submission and polling generate requests. Slow them down on `RATE_LIMITED` (HTTP 429). Automatically retry only queries that are safe to repeat. If `retry_after_ms` is present, wait at least that many milliseconds. Otherwise, increase the interval progressively. Retry at most three times. When the waiting deadline is reached, keep the original reference and check later. Do not automatically resubmit processing tasks.
 
-## Check credits, reconcile usage, and add credits
+## Billing and credit top-ups
 
-- **Check the balance.** `get_credits` returns the authorized account's credit balance.
-- **Check usage for a request.** Read `usage.credits_consumed` or `recorded_credits` from the result.
-- **Insufficient credits.** On `INSUFFICIENT_CREDITS`, pause new submissions. {credit_action} After the balance is restored, continue with files that have not been accepted. Query existing task references first.
+### Monthly free credits
 
-### Handle user feedback
+Free users receive **100 free credits per month**, enough to parse 200 pages of documents or extract information from 125 single-page VAT invoices. If you use up your monthly allowance, a new allowance of 100 credits is automatically issued on the first day of the following month. Unused free credits expire at the end of each month and do not roll over.
+
+### How many credits does each feature use?
+
+| Feature | Credits consumed | Billing unit |
+| --- | ---: | --- |
+| Document parsing | 0.5 credits | Per page |
+| Chinese ID and certificate extraction | 0.5 credits | Per page | <!-- china-invoice -->
+| Purchase order extraction | 1.5 credits | Per page |
+| Overseas invoice extraction | 1 credit | Per page |
+| Chinese domestic invoice extraction | 0.8 credits | Per page | <!-- china-invoice -->
+| Invoice verification | 0.5 credits | Per invoice | <!-- china-invoice -->
+| Custom extraction | 1 credit | Per page |
+
+**Invoice verification is billed per invoice.** Verifying a two-page invoice still costs 0.5 credits. If a 10-page file contains three invoices joined end to end, verifying all three costs 1.5 credits in total. <!-- china-invoice -->
+
+### How do I check my credits?
+
+You can ask your AI assistant: “How many ADP credits do I have left?” The assistant will call `get_credits` to check the currently authorized account's credit balance.
+
+To check the credits consumed by a single processing request, read `usage.credits_consumed` or `recorded_credits` from the result.
+
+### How do I add credits when I run out?
+
+When your free credits run out, you can wait until the first day of the following month for a new allowance. To continue processing documents sooner, add credits through the option available for your account's region or deployment.
+
+{credit_action}
+
+On `INSUFFICIENT_CREDITS`, pause new submissions. After the balance is restored, continue only with files that have not been accepted. For tasks with an existing reference, query the original task first to avoid duplicate processing and charges.
+
+## Handle user feedback
 
 When the user reports inaccurate extraction, task failures, or other processing problems, or requests a capability ADP does not currently offer, first determine whether they want help resolving the issue or want to send feedback to ADP. Call `submit_user_feedback` after the user explicitly requests or agrees to submission.
 
