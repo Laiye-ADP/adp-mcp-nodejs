@@ -2,6 +2,7 @@ import { readFile, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { validationInputSchema } from "../dist/tools.js";
 
 const args = process.argv.slice(2);
 if (args.length > 1 || args.some((arg) => arg !== "--check")) {
@@ -53,10 +54,11 @@ async function readTools(region) {
 }
 const regions = { cn: await readTools("cn"), global: await readTools("global") };
 const commonNames = new Set([
-  "get_adp_guide", "upload_temporary_file", "parse_document", "extract_document",
-  "extract_custom_document", "route_document", "task", "submit_user_feedback"
+  "get_adp_guide", "upload_file", "parse_document", "extract_document", "classify_document",
+  "create_extraction_app", "update_extraction_app", "delete_extraction_app", "list_apps",
+  "get_app", "get_task", "cancel_task", "get_credits", "submit_user_feedback"
 ]);
-const regionalOnly = { cn: ["verify_domestic_invoice"], global: [] };
+const regionalOnly = { cn: ["verify_invoice"], global: [] };
 for (const region of ["cn", "global"]) {
   const expected = new Set([...commonNames, ...regionalOnly[region]]);
   if (regions[region].tools.length !== expected.size || regions[region].tools.some(({ name }) => !expected.has(name))) {
@@ -66,16 +68,12 @@ for (const region of ["cn", "global"]) {
 if (regions.cn.version !== regions.global.version) throw new Error("Regional server versions differ.");
 const version = regions.cn.version;
 const tools = regions.cn.tools.filter(({ name }) => commonNames.has(name));
-const globalInputs = new Map(regions.global.tools.map(({ name, inputSchema }) => [name, requiredInput(inputSchema)]));
-for (const { name, inputSchema } of tools) {
-  if (requiredInput(inputSchema) !== globalInputs.get(name)) throw new Error(`Regional required inputs differ for ${name}.`);
+const globalInputs = new Map(regions.global.tools.map(tool => [tool.name, requiredToolInput(tool)]));
+for (const tool of tools) {
+  if (requiredToolInput(tool) !== globalInputs.get(tool.name)) throw new Error(`Regional required inputs differ for ${tool.name}.`);
 }
-const publicDescriptions = {
-  extract_document: "已知文种且预制字段满足需求时使用。从 get_adp_guide 选取当前区域的预制 app_id，传入文件地址并获取结构化业务字段。选填开关按预制应用支持范围生效。"
-};
-
-const rows = tools.map(({ name, description, inputSchema }) =>
-  `| ${code(name)} | ${requiredInput(inputSchema)} | ${markdownCell(publicDescriptions[name] ?? description ?? "")} |`);
+const rows = tools.map(tool =>
+  `| ${code(tool.name)} | ${requiredToolInput(tool)} | ${markdownCell(tool.description ?? "")} |`);
 const catalog = [
   beginMarker,
   "",
@@ -88,7 +86,7 @@ const catalog = [
   endMarker
 ].join("\n");
 const updated = readme.slice(0, begin) + catalog + readme.slice(end + endMarker.length);
-if (/verify_domestic_invoice|enable_invoice_verify|发票验真|invoice verification/i.test(updated)) {
+if (/verify_invoice|enable_invoice_verify|发票验真|invoice verification/i.test(updated)) {
   throw new Error("README must describe common tools only; regional capabilities stay in tool discovery.");
 }
 if (updated !== readme && args.includes("--check")) {
@@ -101,16 +99,19 @@ if (updated !== readme && args.includes("--check")) {
   console.log(`Node v2 tool catalog matches ${tools.length} common tools from ${version}; regional definitions CN=${regions.cn.tools.length}, Global=${regions.global.tools.length}.`);
 }
 
+function requiredToolInput(tool) {
+  // Both modes expose the same file fields; the private schema also accepts the legacy nested file.
+  if (tool.name === "extract_document") return "（`file_url` 或 `file_base64`） + （`app_id` 或 `fields`）";
+  return requiredInput(validationInputSchema(tool));
+}
+
 function requiredInput(schema) {
-  if (schema.properties.task_ref && schema.properties.run_id && schema.properties.task_id && schema.properties.task_type) {
-    return "`task_ref`、`run_id` 或 `task_id` + `task_type`（三选一）";
+  const parts = (schema.required ?? []).map(code);
+  const branches = schema.oneOf ?? schema.anyOf;
+  if (branches?.length && branches.every(branch => branch.required?.length)) {
+    parts.push(`（${branches.map(requiredInput).join(" 或 ")}）`);
   }
-  const required = (schema.required ?? []).map(code);
-  if (schema.oneOf?.length && schema.oneOf.every(({ required }) => required?.length)) {
-    const choices = schema.oneOf.map(({ required }) => required.map(code).join("、")).join(" 或 ");
-    required.push(required.length ? `（${choices}）` : choices);
-  }
-  return required.join("、") || "无";
+  return parts.join(" + ") || "无";
 }
 
 function code(value) {
@@ -118,5 +119,5 @@ function code(value) {
 }
 
 function markdownCell(value) {
-  return value.replaceAll("|", "\\|").replace(/\s*\r?\n\s*/g, " ").trim();
+  return value.trim().replaceAll("|", "\\|").replace(/\r?\n/g, "<br>");
 }

@@ -1,364 +1,413 @@
-import { setTimeout as delay } from "node:timers/promises";
-import type { JsonSchemaType, JsonSchemaValidator } from "@modelcontextprotocol/sdk/validation";
-import { AjvJsonSchemaValidator } from "@modelcontextprotocol/sdk/validation/ajv";
-import { AdpApiError, type AdpClient, type AdpRegion, type JsonObject } from "./adp-client.js";
-import { batchConcurrency, batchLimit, defaultWaitSeconds, domesticBillsAppId, getGuide, parseAppId, presetExtractionIds } from "./guide.js";
-import { resultSchemas } from "./result-schema.js";
+import { readFileSync } from "node:fs";
+import type { Tool } from "@modelcontextprotocol/sdk/types.js";
+import { Ajv2020 } from "ajv/dist/2020.js";
+import { fullFormats } from "ajv-formats/dist/formats.js";
+import { AdpApiError, type AdpClient, type JsonObject } from "./adp-client.js";
+import { businessGuide } from "./business-guides.js";
 
-type TaskKind = "parse" | "extract" | "classify" | "workflow";
+type TaskKind = "parse" | "extract" | "classify";
 type TaskRef = { kind: TaskKind; id: string };
-type FileReference = { url: string; name?: string };
-type ResultStatus = "pending" | "succeeded" | "failed" | "cancelled" | "partial_success";
+type ResultStatus = "pending" | "succeeded" | "failed" | "cancelled";
 type ScheduleRequest = <T>(request: () => Promise<T>) => Promise<T>;
-type WaitStatus = "paused" | "timeout" | "query_failed";
-type Schema = JsonSchemaType;
-type ObjectSchema = Schema & { type: "object"; properties: Record<string, Schema>; required: string[] };
-type ToolValidators = { validate: JsonSchemaValidator<unknown>; single?: JsonSchemaValidator<unknown> };
 
-const requiredText: Schema = { type: "string", minLength: 1, pattern: "\\S" };
-const fileUrl: Schema = { ...requiredText, format: "uri", description: "可访问的 HTTP(S) 文件 URL，或上传返回的 download_url。" };
-const maxQueryRetries = 3;
-const initialPollIntervalMs = 2000;
-const maxPollIntervalMs = 10000;
-const taskKinds = ["parse", "extract", "classify", "workflow"] as const;
+const cnCatalog: Tool[] = JSON.parse(readFileSync(new URL("../catalog/tools.zh-CN.json", import.meta.url), "utf8"));
+const inputRules: Record<string, Partial<Tool["inputSchema"]>> =
+  JSON.parse(readFileSync(new URL("../catalog/input-rules.json", import.meta.url), "utf8"));
+const globalCatalog = structuredClone(cnCatalog).filter(({ name }) => name !== "verify_invoice");
+for (const tool of globalCatalog) {
+  if (tool.name === "extract_document") delete tool.inputSchema.properties!.enable_invoice_verify;
+}
+export const tools = { cn: cnCatalog, global: globalCatalog };
+const translations: Record<string, string> =
+  JSON.parse(readFileSync(new URL("../catalog/translations.en-US.json", import.meta.url), "utf8"));
+
+function translateToolText(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(translateToolText);
+  if (!isObject(value)) return value;
+  return Object.fromEntries(Object.entries(value).map(([key, item]) => [
+    key,
+    (key === "title" || key === "description") && typeof item === "string"
+      ? translations[item] ?? item
+      : translateToolText(item)
+  ]));
+}
+
+const englishTools = {
+  cn: translateToolText(cnCatalog) as Tool[],
+  global: translateToolText(globalCatalog) as Tool[]
+};
+
+export function getTools(region: "cn" | "global", language: string): Tool[] {
+  return /^en(?:-|$)/i.test(language) ? englishTools[region] : tools[region];
+}
+const validator = new Ajv2020({ strict: false, formats: fullFormats });
+
+// Cross-field rules are kept out of the advertised schema so form clients only render real parameters.
+export function validationInputSchema({ name, inputSchema }: Pick<Tool, "name" | "inputSchema">): Tool["inputSchema"] {
+  if (name === "get_adp_guide") {
+    return { ...inputSchema, properties: { language: { enum: ["zh", "zh-CN", "en", "en-US"] } } };
+  }
+  const rules = inputRules[name];
+  if (!rules) return inputSchema;
+  return {
+    ...inputSchema, ...rules,
+    properties: { ...inputSchema.properties, ...rules.properties },
+    ...(["create_extraction_app", "update_extraction_app"].includes(name) ? { $defs: inputRules.$defs } : {})
+  };
+}
+
+function compileCatalog(catalog: Tool[]) {
+  return new Map(catalog.map(tool => [tool.name, {
+    input: validator.compile(validationInputSchema(tool)), output: validator.compile(tool.outputSchema!)
+  }]));
+}
+const validators = { cn: compileCatalog(tools.cn), global: compileCatalog(tools.global) };
+const parseAppId = "ootb_k7m2x9p4v1n8w3q6r5t0y2b4";
+const domesticBillsAppId = "ootb_v9x2y5z8a1b4c7d0e3f6h9j1k4m7";
+const defaultWaitSeconds = 60;
+const batchConcurrency = 3;
 const taskActions = {
   parse: { route: "/v1/app/doc/recognize", idKey: "task_id" },
   extract: { route: "/v1/app/doc/extract", idKey: "task_id" },
-  classify: { route: "/v1/app/doc/classify", idKey: "task_id" },
-  workflow: { route: "/v1/app/run", idKey: "run_id" }
+  classify: { route: "/v1/app/doc/classify", idKey: "task_id" }
 } as const;
-const taskReference = objectSchema({
-  kind: { type: "string", enum: taskKinds, description: "原任务引用中的类型。" },
-  id: { ...requiredText, maxLength: 128, pattern: "^[A-Za-z0-9_-]+$",
-    description: "原任务引用中的 ID，文档任务来自 task_id，工作流来自 run_id。" }
-}, ["kind", "id"]);
-const output = resultSchemas(taskReference);
-const readOnly = { readOnlyHint: true, idempotentHint: true };
-const submit = { readOnlyHint: false, idempotentHint: false, destructiveHint: false, openWorldHint: true };
-const parseModes = ["standard", "advance", "agentic_v2", "thai_ocr"] as const;
-const documentFile = objectSchema({
-  url: fileUrl, name: { ...requiredText, description: "可选文件名，建议包含扩展名。" }
-}, ["url"]);
-const customDocumentFile = objectSchema({ url: fileUrl }, ["url"]);
-const localFile = objectSchema({
-  file_path: { ...requiredText, description: "本机可读取的文件路径，支持绝对路径或 file:/// 地址。" }
-}, ["file_path"]);
-const waitProperties: Record<string, Schema> = {
-  wait: { type: "boolean", default: true, description: "默认等待；false 在提交完成后立即返回任务引用，随后用 task 查询。" },
-  wait_timeout_seconds: { type: "integer", minimum: 1, maximum: 900, default: defaultWaitSeconds,
-    description: "等待结果的最长秒数。超时后返回原任务引用。" }
+const syncResultFields: Record<TaskKind, string[]> = {
+  parse: ["doc_recognize_result"],
+  extract: ["extraction_result"],
+  classify: ["segments", "unclassified_pages"]
 };
-const pages: Schema = { type: "array", items: { type: "integer", minimum: 1 }, uniqueItems: true, default: [],
-  description: "选填，省略或传 [] 时处理全部页面。只处理指定页时填写原始页码，从 1 开始且不能重复。" };
-const invoiceTypes = [
-  { key: "vat_special_invoice", label: "增值税专用发票", fields: ["fpCode", "fpNoTaxAmount"] },
-  { key: "vat_electronic_special_invoice", label: "增值税电子专用发票", fields: ["fpCode", "fpNoTaxAmount"] },
-  { key: "vat_common_invoice", label: "增值税普通发票", fields: ["fpCode", "fpCRC"] },
-  { key: "vat_electronic_invoice", label: "增值税电子普通发票", fields: ["fpCode", "fpCRC"] },
-  { key: "vat_roll_invoice", label: "增值税发票卷票", fields: ["fpCode", "fpCRC"] },
-  { key: "vat_electronic_special_invoice_new", label: "电子发票增值税专用发票", fields: ["fpAmount"] },
-  { key: "vat_electronic_invoice_new", label: "电子发票普通发票", fields: ["fpAmount"] },
-  { key: "motor_vehicle_sale_invoice", label: "机动车销售统一发票", fields: ["fpCode", "fpNoTaxAmount"] },
-  { key: "used_car_purchase_invoice", label: "二手车销售统一发票", fields: ["fpCode", "fpAmount"] },
-  { key: "electronic_air_transport", label: "电子发票航空运输电子客票行程单", fields: ["fpAmount"] },
-  { key: "electronic_train_ticket", label: "电子发票铁路电子客票", fields: ["fpAmount"] }
-] as const;
 const defaultInvoiceType = "vat_electronic_invoice_new";
 const invoiceInputFields = ["fpNumber", "fpDate", "fpCode", "fpAmount", "fpNoTaxAmount", "fpCRC", "instance_id"] as const;
 
-function buildTools(region: AdpRegion) {
-  const global = region === "global";
-  return [
-    {
-      name: "get_adp_guide", title: "获取引导说明文档",
-      description: "获取与当前 MCP 连接版本和区域对应的 ADP 引导说明。正文包含预制应用名称与 app_id 对照表、文件上传步骤和文档处理调用示例。",
-      inputSchema: objectSchema({}),
-      annotations: { ...readOnly, openWorldHint: false },
-      outputSchema: output.get_adp_guide
-    },
-    {
-      name: "upload_temporary_file", title: "上传本地文件",
-      description: "将本机路径放入 files，每项填写 file_path，单文件也传一项。上传成功后从 files[].data 取 download_url。已有可访问的 HTTP(S) 文件地址时可直接用于业务工具。",
-      inputSchema: objectSchema({
-        files: { ...arraySchema(localFile), description: `每次可传 1–${batchLimit} 份本地文件，逐份上传，最多 ${batchConcurrency} 个上传请求同时进行。` }
-      }, ["files"]),
-      annotations: submit,
-      outputSchema: output.upload_temporary_file
-    },
-    {
-      name: "parse_document", title: "解析文档全文",
-      description: "需要阅读、检索或处理文档全文时使用。将文件地址放入 files，返回逐页文本和文档结构。可用 recognize_mode 选择解析模式，或用 pages 指定要解析的原始页码。",
-      inputSchema: documentInput({
-        ...waitProperties,
-        pages,
-        recognize_mode: { type: "string", enum: parseModes, description: "解析模式，适用场景见 get_adp_guide。" }
-      }),
-      annotations: submit,
-      outputSchema: output.parse_document
-    },
-    {
-      name: "extract_document", title: "常见文档抽取",
-      description: global
-        ? "从 get_adp_guide 选取全球区预制 app_id，传入文件地址，抽取海外发票和收据或采购订单的结构化字段。海外发票默认使用国际通用高速版。选填开关按预制应用支持范围生效。"
-        : "已知文种且预制字段满足需求时使用。从 get_adp_guide 选取预制 app_id，传入文件地址，获取票据、卡证、采购订单等文档的结构化业务字段。海外发票默认使用国际通用高速版。附带解析结果、多票拆分、发票验真、字段值翻译、原文定位和字段置信度均为选填开关。无需覆盖时省略对应参数，显式 false 会关闭适用功能。发票验真仅适用于国内通用票据。",
-      inputSchema: documentInput({
-        app_id: { ...requiredText, enum: [...presetExtractionIds[region]], description: "从 get_adp_guide 的对照表选择对应文种的预制抽取应用 ID。" },
-        pages: { ...pages, description: `${pages.description} 指定页码仅对支持页码筛选的预制应用生效。` },
-        with_rec_result: { type: "boolean", title: "附带解析结果", description: "仅对支持附带解析结果的预制应用生效。需要全文时用 parse_document。" },
-        enable_multi_ticket: { type: "boolean", title: "多票拆分", description: "将多张票据分别返回。海外发票仅国际通用高速版和东南亚高速版支持，省略时使用默认值 true。" },
-        ...(!global && { enable_invoice_verify: {
-          type: "boolean", title: "发票验真",
-          description: "仅国内通用票据支持。true 或 false 覆盖本次发票验真设置，省略时沿用应用配置。"
-        } }),
-        enable_field_value_translation: { type: "boolean", title: "字段值翻译", description: "在支持的预制应用上覆盖本次字段值翻译设置。省略时沿用应用配置。" },
-        enable_highlight: { type: "boolean", title: "原文定位", description: "在支持的高速版上覆盖本次原文定位设置。省略时沿用应用配置。" },
-        enable_confidence: { type: "boolean", title: "字段置信度", description: "在支持的高速版上覆盖本次字段置信度设置。省略时沿用应用配置。" },
-        ...waitProperties
-      }, ["app_id"]),
-      annotations: submit,
-      outputSchema: output.extract_document
-    },
-    {
-      name: "extract_custom_document", title: "自定义字段抽取",
-      description: "预制应用未覆盖文种或所需字段时使用。传入文件地址和本次要抽取的 fields，每个字段提供 name，可选 prompt。同步返回这些字段的结构化结果。",
-      inputSchema: documentInput({
-        fields: {
-          type: "array", minItems: 1, maxItems: 20,
-          description: "本次抽取的字段定义，批量处理时对所有文件使用同一组字段。",
-          items: objectSchema({
-            name: { ...requiredText, description: "字段名称。同一组字段的名称不能重复。" },
-            prompt: { type: "string", description: "可选字段说明，如目标格式或取值规则。" }
-          }, ["name"])
-        }
-      }, ["fields"], customDocumentFile),
-      annotations: submit,
-      outputSchema: output.extract_custom_document
-    },
-    {
-      name: "route_document", title: "按文种分类",
-      description: "文种未知或同一文件混有多种文档时使用。传入已有分类应用的 app_id 和文件地址，返回分类片段的文种、原始页码及未分类页。需要继续抽取时，按分类结果选择抽取工具。",
-      inputSchema: documentInput({
-        app_id: { ...requiredText, description: "已有分类应用的 ID，由用户提供。预制抽取应用 ID 不适用。" },
-        pages: { ...pages, maxItems: 260 },
-        ...waitProperties
-      }, ["app_id"]),
-      annotations: submit,
-      outputSchema: output.route_document
-    },
-    ...(!global ? [{
-      name: "verify_domestic_invoice", title: "国内发票验真",
-      description: "仅用于中国区的中国大陆发票独立验真；海外发票和收据不适用。根据票面字段对一张发票验真，无需上传文件。fpNumber、fpDate 始终必填，11 种票据还需填写的字段见下表。type_key 默认 vat_electronic_invoice_new，仅确认是全电普通发票时可省略，文种不明时先确认。缺少关键字段时先抽取或询问用户，不要猜测。使用非空字符串，保留号码前导零。调用可能消耗积分。应结合 verification_status 和 data.result.fpVerification 判断：consistent 表示票面信息一致，inconsistent 表示不一致，not_found 表示未找到匹配发票。这三种均返回 status=succeeded，表示已取得可判定结论，succeeded 不代表发票一致。即使信息一致，也应查看 data.result.fpIsVoided 的作废或冲红状态。不一致或不存在不能直接认定伪造。unverifiable、unsupported、unknown 返回 status=failed 并保留原始 data。不要自动重复提交。usage 仅返回接口已有积分记录，usage_status=unavailable 表示未返回积分金额。\nvat_special_invoice (增值税专用发票): fpCode, fpNoTaxAmount\nvat_electronic_special_invoice (增值税电子专用发票): fpCode, fpNoTaxAmount\nvat_common_invoice (增值税普通发票): fpCode, fpCRC\nvat_electronic_invoice (增值税电子普通发票): fpCode, fpCRC\nvat_roll_invoice (增值税发票卷票): fpCode, fpCRC\nvat_electronic_special_invoice_new (电子发票增值税专用发票): fpAmount\nvat_electronic_invoice_new (电子发票普通发票): fpAmount\nmotor_vehicle_sale_invoice (机动车销售统一发票): fpCode, fpNoTaxAmount\nused_car_purchase_invoice (二手车销售统一发票): fpCode, fpAmount\nelectronic_air_transport (电子发票航空运输电子客票行程单): fpAmount\nelectronic_train_ticket (电子发票铁路电子客票): fpAmount",
-      inputSchema: objectSchema({
-        type_key: { ...requiredText, enum: invoiceTypes.map(({ key }) => key), default: defaultInvoiceType, description: "票据类型，默认电子发票普通发票；仅确认全电普通发票时可省略，文种不明先确认。11 种类型的名称与必填字段见本工具描述。" },
-        fpNumber: { ...requiredText, description: "发票号码，始终必填；按票面原样填写并保留前导零。" },
-        fpDate: { ...requiredText, description: "开票日期、填制日期或乘车日期，始终必填；按票面填写，例如 2026-06-01。" },
-        fpCode: { ...requiredText, description: "发票代码。vat_special_invoice、vat_electronic_special_invoice、vat_common_invoice、vat_electronic_invoice、vat_roll_invoice、motor_vehicle_sale_invoice、used_car_purchase_invoice 必填；其他票种可省略。保留前导零。" },
-        fpAmount: { ...requiredText, description: "价税合计、票价或合计金额字符串。vat_electronic_special_invoice_new、vat_electronic_invoice_new、used_car_purchase_invoice、electronic_air_transport、electronic_train_ticket 必填；其他票种可省略。" },
-        fpNoTaxAmount: { ...requiredText, description: "不含税金额字符串。vat_special_invoice、vat_electronic_special_invoice、motor_vehicle_sale_invoice 必填，使用票面不含税金额；其他票种可省略。" },
-        fpCRC: { ...requiredText, description: "校验码。vat_common_invoice、vat_electronic_invoice、vat_roll_invoice 必填；可传完整校验码，服务使用末 6 位。其他票种可省略。" },
-        instance_id: { ...requiredText, description: "可选的业务侧实例 ID，省略时由接口生成。" }
-      }, ["fpNumber", "fpDate"]),
-      annotations: submit,
-      outputSchema: output.verify_domestic_invoice
-    }] : []),
-    {
-      name: "task", title: "任务管理",
-      description: "查询异步任务的状态、可用结果和用量，或取消任务。传入 task_ref、run_id 或 task_id 与 task_type 中的一种。action 默认为 query。仅取消尚未被领取的待执行文档任务，工作流支持查询。",
-      inputSchema: objectSchema({
-        action: { type: "string", enum: ["query", "cancel"], default: "query", description: "query 查询状态、结果和用量；cancel 尝试取消尚未被领取的待执行文档任务。工作流仅支持 query，不重新提交任务。" },
-        task_ref: { ...taskReference, description: "业务工具返回的完整任务引用。与 run_id、task_id、task_type 互斥。" },
-        run_id: { ...requiredText, maxLength: 128, pattern: "^[A-Za-z0-9_-]+$", description: "工作流运行 ID。与 task_ref、task_id、task_type 互斥。" },
-        task_id: { ...requiredText, maxLength: 128, pattern: "^[A-Za-z0-9_-]+$", description: "文档任务 ID，必须同时提供 task_type。与 task_ref、run_id 互斥。" },
-        task_type: { type: "string", enum: ["parse", "extract", "classify"], description: "task_id 对应的文档任务类型：parse 解析、extract 抽取、classify 分类。" }
-      }),
-      annotations: { readOnlyHint: false, idempotentHint: true, destructiveHint: true, openWorldHint: true },
-      outputSchema: output.task
-    },
-    {
-      name: "submit_user_feedback", title: "提交用户反馈",
-      description: "提交用户的使用问题（issue）或改进建议（suggestion）。传入去除凭证和无关敏感信息的事实摘要，成功返回反馈编号。可附上用户明确同意提交的本地材料。",
-      inputSchema: objectSchema({
-        feedback_type: { type: "string", enum: ["issue", "suggestion"], description: "issue 表示使用问题，suggestion 表示需求或改进建议。" },
-        content: { ...requiredText, maxLength: 1000, description: "反馈摘要，最多 1000 字符。包括场景、目标、实际表现和已尝试的处理方式。" },
-        allow_follow_up: { type: "boolean", default: true, description: "是否允许 ADP 通过当前账号联系用户。" },
-        attachment_paths: {
-          type: "array", maxItems: 5, items: requiredText,
-          description: "获授权且已检查的本地附件路径，每个文件最多 50 MiB。"
-        },
-        attachments_authorized: { type: "boolean", description: "用户已明确同意提交这些附件时设为 true。" }
-      }, ["feedback_type", "content"]),
-      annotations: submit,
-      outputSchema: output.submit_user_feedback
+const inputRepairMessages = {
+  missing_file_source: {
+    zh: "缺少待处理文件。请通过 file_url 或 file_base64 提供一份文件。",
+    en: "A document is required. Provide one file using file_url or file_base64."
+  },
+  incomplete_task_ref: {
+    zh: "任务引用不完整。请原样传入提交任务时返回的 task_ref（包含 kind 和 id），或改为同时传入 task_type 和 task_id。",
+    en: "The task reference is incomplete. Pass the original task_ref containing kind and id, or supply both task_type and task_id instead."
+  },
+  file_name_not_supported_with_fields: {
+    zh: "按 fields 抽取时，请移除 file_name，保留文件来源和 fields 后重试。",
+    en: "For extraction with fields, remove file_name and retry with the file source and fields."
+  }
+} as const;
+
+function inputRepairReason(name: string, args: JsonObject): keyof typeof inputRepairMessages | undefined {
+  if (name === "get_task" || name === "cancel_task") {
+    if ("task_ref" in args) {
+      if (!isObject(args.task_ref) || !("kind" in args.task_ref) || !("id" in args.task_ref)) return "incomplete_task_ref";
+    } else if (!("task_type" in args) || !("task_id" in args)) {
+      return "incomplete_task_ref";
     }
-  ];
+  }
+  const fieldExtraction = name === "extract_document" && !("app_id" in args) && Array.isArray(args.fields) && args.fields.length > 0;
+  if (fieldExtraction && "file_name" in args) {
+    return "file_name_not_supported_with_fields";
+  }
+  const missingFieldsFile = fieldExtraction && (!("file" in args) || isEmptyObject(args.file));
+  const requiresFile = name === "parse_document" || name === "classify_document"
+    || (name === "extract_document" && "app_id" in args) || missingFieldsFile;
+  if (requiresFile && !("file_url" in args) && !("file_base64" in args)) {
+    return "missing_file_source";
+  }
 }
 
-export const tools = { cn: buildTools("cn"), global: buildTools("global") };
-const schemaValidator = new AjvJsonSchemaValidator();
-const documentToolNames = new Set(["parse_document", "extract_document", "extract_custom_document", "route_document"]);
-const nullablePresetSwitches = ["enable_invoice_verify", "enable_field_value_translation", "enable_highlight", "enable_confidence"];
-function buildInputValidators(catalog: typeof tools.cn) {
-  return new Map<string, ToolValidators>(catalog.map(({ name, inputSchema }) => {
-    const { properties, required } = inputSchema;
-    const runtimeProperties: Record<string, Schema> = { ...properties };
-    if (name === "get_adp_guide") {
-      runtimeProperties.language = { type: "string", enum: ["zh", "zh-CN", "en", "en-US"] };
-    } else if (name === "extract_document") {
-      runtimeProperties.card_type = requiredText;
-      for (const key of nullablePresetSwitches) {
-        const property = runtimeProperties[key];
-        if (property) runtimeProperties[key] = { ...property, type: ["boolean", "null"] };
-      }
-    } else if (name === "extract_custom_document") {
-      // Preserve names as result labels for callers using the previous batch schema.
-      runtimeProperties.files = arraySchema(documentFile);
-    }
-    const validate = schemaValidator.getValidator(objectSchema(runtimeProperties, required));
-    if (name === "upload_temporary_file") {
-      const single = schemaValidator.getValidator(localFile);
-      return [name, { validate, single }] as const;
-    }
-    if (documentToolNames.has(name)) {
-      const { files: _files, ...options } = runtimeProperties;
-      const single = schemaValidator.getValidator(objectSchema({ file_url: fileUrl, file_name: requiredText, ...options },
-        ["file_url", ...required.filter(key => key !== "files")]));
-      return [name, { validate, single }] as const;
-    }
-    return [name, { validate }] as const;
-  }));
-}
-const inputValidators = { cn: buildInputValidators(tools.cn), global: buildInputValidators(tools.global) };
-
-export async function callTool(
-  name: string, args: JsonObject, client: AdpClient, version: string, signal?: AbortSignal
-): Promise<JsonObject> {
+export async function callTool(name: string, args: JsonObject, client: AdpClient, version: string, signal?: AbortSignal): Promise<JsonObject> {
   const region = name === "get_adp_guide" ? await client.getCatalogRegion(signal) : await client.prepareConnection(signal);
-  if (name === "verify_domestic_invoice" && !client.domesticInvoiceRegionConfirmed) {
-    throw new AdpApiError("国内发票验真仅支持已确认的中国区连接，请核对API Key和区域配置。", {
-      code: "INVOICE_VERIFICATION_REGION_UNSUPPORTED", retryable: false
-    });
+  if (name === "verify_invoice" && !client.domesticInvoiceRegionConfirmed) {
+    throw new AdpApiError("国内发票验真仅支持已确认的中国区连接。", { code: "INVOICE_VERIFICATION_REGION_UNSUPPORTED", retryable: false });
   }
-  const validators = inputValidators[region].get(name);
-  if (!validators) throw new Error("未知工具。");
+  const entry = validators[client.domesticInvoiceRegionConfirmed ? region : "global"].get(name);
+  if (!entry) throw new Error("未知工具。");
+  args = normalizeToolInput(name, args);
+  if (!entry.input(args)) {
+    const reason = inputRepairReason(name, args);
+    if (reason) {
+      const locale = /^en(?:-|$)/i.test(client.language) ? "en" : "zh";
+      throw new AdpApiError(inputRepairMessages[reason][locale], { code: "INVALID_ARGUMENTS", reason, retryable: false });
+    }
+    throw new AdpApiError(name + " 参数不符合工具定义。" + validator.errorsText(entry.input.errors),
+      { code: name === "verify_invoice" ? "INVOICE_VERIFICATION_INPUT_REQUIRED" : "INVALID_ARGUMENTS", retryable: false });
+  }
+  const result = await runTool(name, args, client, version, signal);
+  if (!entry.output(result)) {
+    const msg = "ADP 返回的数据不符合 " + name + " 的结果契约。";
+    if (["create_extraction_app", "update_extraction_app", "delete_extraction_app"].includes(name)) throw unknownReceipt(msg);
+    throw new AdpApiError(msg, { code: "INVALID_RESPONSE", retryable: false });
+  }
+  return result;
+}
 
-  if (name === "extract_document" && typeof args.app_id === "string") {
-    const appId = args.app_id.trim();
-    if (!presetExtractionIds[region].has(appId)) throw new Error("请选择 get_adp_guide 中当前区域的预制抽取 app_id。");
-    args = { ...args, app_id: appId };
+function normalizeToolInput(name: string, args: JsonObject): JsonObject {
+  if (name === "extract_document") return normalizeExtractionInput(args);
+  if (name === "classify_document" && Array.isArray(args.pages) && args.pages.length === 0) {
+    const { pages, ...rest } = args;
+    return rest;
   }
-  const single = args.file_path !== undefined || args.file_url !== undefined ? validators.single : undefined;
-  if (single && args.files !== undefined) {
-    throw new Error("请只传 files。旧版单文件参数不能与 files 同时使用。");
+  if ((name === "get_task" || name === "cancel_task") && isEmptyObject(args.task_ref)
+      && args.task_id !== undefined && args.task_type !== undefined) {
+    const { task_ref, ...identifiers } = args;
+    return identifiers;
   }
-  const validate = single ?? validators.validate;
-  const validation = validate(args);
-  if (!validation.valid) throw new Error(`${name} 参数不符合工具定义。${validation.errorMessage}`);
-  if (Array.isArray(args.pages) && args.pages.length === 0) {
-    const { pages: _emptyPages, ...options } = args;
-    args = options;
+  if (name !== "create_extraction_app" && name !== "update_extraction_app") return args;
+  if (name === "create_extraction_app") {
+    args = { ...args };
+    // Some form clients submit empty arrays for the unselected application type.
+    for (const key of args.ai_function === 1426 ? ["extract_fields", "app_label"] : ["classify_types"]) {
+      const value = args[key];
+      if (Array.isArray(value) && value.length === 0) delete args[key];
+    }
   }
+  if (!Array.isArray(args.extract_fields)) return args;
+  if (name === "update_extraction_app" && !args.extract_fields.length && args.config_version === undefined
+      && (args.app_name !== undefined || args.description !== undefined)) {
+    const { extract_fields, ...metadata } = args;
+    return metadata;
+  }
+  const fields = args.extract_fields.map(field => {
+    if (!isObject(field)) return field;
+    const clean = { ...field };
+    if (isEmptyObject(clean.format)) delete clean.format;
+    if (Array.isArray(clean.sub_fields)) {
+      if (clean.field_type !== "table" && clean.sub_fields.length === 0) delete clean.sub_fields;
+      else clean.sub_fields = clean.sub_fields.map(column => {
+        if (!isObject(column) || !isEmptyObject(column.format)) return column;
+        const { format, ...rest } = column;
+        return rest;
+      });
+    }
+    return clean;
+  });
+  return { ...args, extract_fields: fields };
+}
 
+function isEmptyObject(value: unknown): boolean {
+  return isObject(value) && Object.keys(value).length === 0;
+}
+
+function classificationCategories(categories: JsonObject[]): JsonObject[] {
+  const keys = new Set<string>();
+  const names = new Set<string>();
+  return categories.map(category => {
+    const key = category.category_key as string;
+    const typeName = (category.type_name as string).trim();
+    const folded = typeName.toLowerCase();
+    if (!typeName || folded === "unclassified" || keys.has(key) || names.has(folded)) {
+      throw new AdpApiError("类别标识必须唯一，类别名称忽略大小写且必须唯一、非空，不能使用 UNCLASSIFIED。",
+        { code: "INVALID_ARGUMENTS", retryable: false });
+    }
+    keys.add(key);
+    names.add(folded);
+    return { ...category, type_name: typeName };
+  });
+}
+
+function normalizeExtractionInput(args: JsonObject): JsonObject {
+  const input = { ...args };
+  if ("app_id" in input) {
+    if (Array.isArray(input.fields) && input.fields.length === 0) delete input.fields;
+    return input;
+  }
+  if (!Array.isArray(input.fields) || input.fields.length === 0) return input;
+
+  // Form clients can send untouched application-mode defaults for a one-off extraction.
+  if (input.wait === true) delete input.wait;
+  if (input.wait_timeout_seconds === defaultWaitSeconds) delete input.wait_timeout_seconds;
+  if (Array.isArray(input.pages) && input.pages.length === 0) delete input.pages;
+  if (input.file_name === "") delete input.file_name;
+
+  // An older client can still send the native direct-fast file object. Keeping
+  // both shapes in a mixed request lets validation reject the ambiguous source.
+  if (!("file" in input) && ("file_url" in input || "file_base64" in input)) {
+    const file: JsonObject = {};
+    if ("file_url" in input) file.url = input.file_url;
+    if ("file_base64" in input) file.base64 = input.file_base64;
+    delete input.file_url;
+    delete input.file_base64;
+    input.file = file;
+  }
+  return input;
+}
+
+async function runTool(name: string, args: JsonObject, client: AdpClient, version: string, signal?: AbortSignal): Promise<JsonObject> {
   switch (name) {
     case "get_adp_guide":
-      return {
-        status: "succeeded", version,
-        markdown: getGuide(version, (args.language as string | undefined) ?? client.language, region, client.catalogRegionConfirmed),
-        next_steps: [{ message: "按引导说明选择工具。处理本地文件前先上传。" }]
-      };
-    case "upload_temporary_file":
+      return { status: "succeeded", version,
+        markdown: businessGuide((args.language as string | undefined) ?? client.language, client.guideWorkspace, client.domesticInvoiceRegionConfirmed) };
+    case "upload_file":
       return uploadFiles(args, client, signal);
-    case "verify_domestic_invoice":
-      return verifyDomesticInvoice(args, client, signal);
-    case "task": {
-      const ref = resolveTaskReference(args);
-      return args.action === "cancel"
-        ? cancelExistingTask(ref, client, signal)
-        : { ...await queryExistingTask(ref, client, signal), action: "query" };
-    }
     case "submit_user_feedback": {
       const attachmentPaths = (args.attachment_paths as string[] | undefined) ?? [];
+      const english = /^en(?:-|$)/i.test(client.language);
       if (attachmentPaths.length && args.attachments_authorized !== true) {
-        throw new AdpApiError("请先取得用户对这些附件的明确授权，或只提交文字反馈。", {
+        throw new AdpApiError(english ? "Obtain the user's approval for these attachments, or submit text only."
+          : "请先取得用户对这些附件的明确同意，或只提交文字反馈。", {
           code: "ATTACHMENT_AUTHORIZATION_REQUIRED", retryable: false
         });
       }
-      const envelope = await client.submitFeedback({
-        feedbackType: args.feedback_type as "suggestion" | "issue",
+      const { data } = await client.submitFeedback({
+        feedbackType: args.feedback_type as "issue" | "suggestion",
         content: (args.content as string).trim(),
         allowFollowUp: args.allow_follow_up !== false,
         attachmentPaths
       }, signal);
-      const data = envelope.data;
       if (!isObject(data) || typeof data.id !== "string" || !data.id.trim()
           || typeof data.created_at !== "string" || !data.created_at.trim()) {
-        throw new AdpApiError("未收到完整的反馈回执，提交状态未知。请保留摘要，避免自动重复提交。", {
+        throw new AdpApiError(english ? "The feedback receipt is incomplete. Submission could not be confirmed."
+          : "反馈回执不完整，暂时无法确认提交结果。", {
           code: "FEEDBACK_RECEIPT_MISSING", retryable: false, acceptance_unknown: true
         });
       }
       return {
         status: "succeeded", data: { id: data.id, created_at: data.created_at },
-        next_steps: [{ message: "反馈已受理，请保存 data.id 作为反馈编号。" }]
+        next_steps: [{ message: english ? "Keep data.id as your feedback ID." : "请保存 data.id 作为反馈编号。" }]
       };
     }
-    case "extract_custom_document": {
-      const fields = args.fields as { name: string; prompt?: string }[];
-      const normalized = fields.map(({ name, ...options }) => ({ name: name.trim(), ...options }));
-      if (new Set(normalized.map(({ name }) => name.toLowerCase())).size !== normalized.length) {
-        throw new Error("fields 中的字段名称必须唯一。");
+    case "verify_invoice":
+      return verifyDomesticInvoice(args, client, signal);
+    case "get_task":
+      return { ...await queryExistingTask(taskReference(args), client, signal), action: "query" };
+    case "cancel_task":
+      return cancelExistingTask(taskReference(args), client, signal);
+    case "list_apps": {
+      const filters = { engine_type: "document", ...args };
+      const query = Object.fromEntries(Object.entries(filters).map(([key, value]) => [key, String(value)]));
+      const data = requireData(await client.request(client.documentPath("/v1/app-catalog"), { query, signal }));
+      return { status: "succeeded", data };
+    }
+    case "get_app":
+      return { status: "succeeded", data: await getAppDetail(client, args.app_id as string, signal, args.config_version as string | undefined) };
+    case "create_extraction_app": {
+      const { timeout_seconds, ai_function = 1425, ...config } = args;
+      if (ai_function === 1426) config.classify_types = classificationCategories(config.classify_types as JsonObject[]);
+      const data = mutationData(await client.request(client.documentPath("/v1/app-manage/create"), {
+        method: "POST", body: { ...config, ai_function }, timeoutMs: Number(timeout_seconds ?? 300) * 1000, signal
+      }));
+      const receivedType = data.ai_function === undefined ? 1425 : data.ai_function;
+      if (receivedType !== ai_function) throw unknownReceipt("应用创建回执中的类型与请求不一致。");
+      return data;
+    }
+    case "update_extraction_app":
+    case "delete_extraction_app": {
+      const operation = name === "update_extraction_app" ? "update" : "delete";
+      const data = mutationData(await client.request(client.documentPath("/v1/app-catalog/extraction/" + operation), {
+        method: "POST", body: args, signal
+      }));
+      if (name === "update_extraction_app" && data.app_id !== args.app_id) {
+        throw unknownReceipt("应用更新回执的 ID 与请求不一致，请检查目标应用的配置。");
       }
-      return processDocuments(args, (file) => extractDirect(file.url, normalized, client, signal), client, signal);
+      if (name === "delete_extraction_app" && data.success === false) {
+        throw new AdpApiError("应用删除失败。", { code: "DELETE_FAILED", retryable: false });
+      }
+      return data;
+    }
+    case "get_credits": {
+      const receipt = await client.request(client.documentPath("/v1/user/payment"), { signal, rawResponse: true });
+      const balance = isObject(receipt.data) ? receipt.data : receipt;
+      const data = Object.fromEntries(["total_credits", "used_credits", "expired_credits", "remaining_credits"]
+        .map(key => [key, balance[key]]));
+      return { status: "succeeded", data };
     }
     case "parse_document": {
-      const recognizeConfig = {
-        ...(args.recognize_mode === undefined ? {} : { recognize_mode: args.recognize_mode }),
-        // PDF text-first parsing can return pages outside the requested selection.
-        ...(args.pages === undefined ? {} : { enable_pdf_parse: false })
-      };
-      const modelParams = {
-        ...(args.pages === undefined ? {} : { pages: args.pages }),
-        ...(Object.keys(recognizeConfig).length ? { recognize_config: recognizeConfig } : {})
-      };
-      return processDocuments(args, (file) => createTask("parse", {
-        app_id: parseAppId, ...documentBody(file), ...(Object.keys(modelParams).length ? { model_params: modelParams } : {})
-      }, client, signal), client, signal);
+      const config = selectOptions(args, ["enable_highlight", "remove_header_footer", "enable_stamp_recognition"]);
+      config.recognize_mode = args.recognize_mode ?? (args.remove_header_footer === true ? "agentic_v2" : "fast_vlm");
+      const pages = pageOptions(args);
+      if (pages.pages) config.enable_pdf_parse = false;
+      return processDocument("parse", args, {
+        ...documentSource(args), app_id: parseAppId, model_params: { ...pages, recognize_config: config }
+      }, client, signal);
     }
     case "extract_document": {
-      const appId = args.app_id as string;
-      if (args.enable_invoice_verify !== undefined && appId !== domesticBillsAppId) {
-        throw new Error("enable_invoice_verify 仅支持国内通用票据预制应用。");
+      if (Array.isArray(args.fields)) {
+        const fields = (args.fields as { name: string; prompt?: string | null }[]).map(field => ({ ...field, name: field.name.trim() }));
+        if (new Set(fields.map(({ name }) => name.toLowerCase())).size !== fields.length) throw new Error("字段名称必须唯一。");
+        const file = args.file as JsonObject;
+        return extractDirect(typeof file.url === "string" ? { url: normalizeFileUrl(file.url) } : file, fields, client, signal);
       }
-      const options = Object.fromEntries(
-        ["card_type", "with_rec_result", "enable_multi_ticket", "enable_invoice_verify", "enable_field_value_translation",
-          "enable_highlight", "enable_confidence"]
-          .filter((key) => args[key] !== undefined)
-          .map((key) => [key, args[key]])
-      );
-      return processDocuments(args, (file) => createTask("extract", {
-        app_id: appId, ...documentBody(file), ...pageOptions(args), ...options
-      }, client, signal), client, signal);
+      const appId = (args.app_id as string).trim();
+      if (args.enable_invoice_verify !== undefined && appId !== domesticBillsAppId) {
+        throw new Error("enable_invoice_verify 仅支持国内通用票据预置应用。");
+      }
+      if (appId.startsWith("ootb_")) {
+        const preset = await getAppDetail(client, appId, signal);
+        if (preset.source !== "preset" || preset.engine_type !== "extract") {
+          throw new AdpApiError("请选择当前账号可用的预置抽取应用。", { code: "EXTRACTION_PRESET_REQUIRED", retryable: false });
+        }
+      }
+      const options = selectOptions(args, ["with_rec_result", "enable_multi_ticket", "enable_invoice_verify",
+        "enable_field_value_translation", "enable_highlight", "enable_confidence"]);
+      const pages = pageOptions(args);
+      return processDocument("extract", args, { ...documentSource(args, true), app_id: appId, ...options,
+        ...(pages.pages ? { model_params: pages } : {}) }, client, signal);
     }
-    case "route_document":
-      return processDocuments(args, (file) => createTask("classify", {
-        app_id: (args.app_id as string).trim(), ...documentBody(file), ...pageOptions(args)
-      }, client, signal), client, signal);
+    case "classify_document": {
+      const pages = pageOptions(args);
+      return processDocument("classify", args, { ...documentSource(args), app_id: (args.app_id as string).trim(),
+        ...(pages.pages ? { model_params: pages } : {}) }, client, signal);
+    }
     default:
-      throw new Error(`未知工具 ${name}。`);
+      throw new Error("未知工具。");
   }
 }
 
-function objectSchema(properties: Record<string, Schema>, required: string[] = []): ObjectSchema {
-  return { type: "object", properties, required, additionalProperties: false };
+async function getAppDetail(client: AdpClient, appId: string, signal?: AbortSignal, configVersion?: string): Promise<JsonObject> {
+  const query = { app_id: appId, ...(configVersion === undefined ? {} : { config_version: configVersion }) };
+  const data = requireData(await client.request(client.documentPath("/v1/app-catalog/detail"), { query, signal }));
+  if (data.app_id !== appId) {
+    throw new AdpApiError("应用详情回执的 ID 与请求不一致。", { code: "APP_ID_MISMATCH", retryable: false });
+  }
+  return data;
 }
 
-function arraySchema(items: Schema): Schema {
-  return { type: "array", items, minItems: 1, maxItems: batchLimit };
+function selectOptions(args: JsonObject, keys: string[]): JsonObject {
+  return Object.fromEntries(keys.filter(key => args[key] !== undefined).map(key => [key, args[key]]));
 }
 
-function documentInput(properties: Record<string, Schema>, required: string[] = [], file = documentFile): ObjectSchema {
-  return objectSchema({
-    files: { ...arraySchema(file), description: `每次可传 1–${batchLimit} 份待处理文件，每项填写 url。逐文件提交，单次调用最多 ${batchConcurrency} 个提交或轮询请求在途。` },
-    ...properties
-  }, ["files", ...required]);
+function documentSource(args: JsonObject, allowJobId = false): JsonObject {
+  const file = selectOptions(args, ["file_url", "file_base64", "file_name"]);
+  if (typeof file.file_url === "string" && !(allowJobId && /^jobid:\/\/[a-f0-9]{32}$/i.test(file.file_url))) {
+    file.file_url = normalizeFileUrl(file.file_url);
+  }
+  return file;
+}
+
+function pageOptions(args: JsonObject): JsonObject {
+  return Array.isArray(args.pages) && args.pages.length ? { pages: args.pages } : {};
+}
+
+function taskReference(args: JsonObject): TaskRef {
+  return (args.task_ref as TaskRef | undefined) ?? { kind: args.task_type as TaskKind, id: args.task_id as string };
+}
+
+async function processDocument(kind: TaskKind, args: JsonObject, body: JsonObject, client: AdpClient, signal?: AbortSignal) {
+  if (args.wait === false) return createTask(kind, body, client, signal);
+
+  try {
+    const envelope = await client.request(taskPath(kind, "", client), {
+      method: "POST", body, signal, timeoutMs: Number(args.wait_timeout_seconds ?? defaultWaitSeconds) * 1000
+    });
+    const data = envelope.data;
+    const status = isObject(data) ? taskStatus(kind, data.status) : undefined;
+    if (!isObject(data) || !status || status === "pending") {
+      throw unknownReceipt("同步接口未返回最终处理状态。", 502);
+    }
+    if (status === "succeeded" && !syncResultFields[kind].every(field => Array.isArray(data[field]))) {
+      throw unknownReceipt("同步接口未返回完整的文档处理结果。", 502);
+    }
+    return documentResult(envelope, data, status, client);
+  } catch (error) {
+    if (signal?.aborted) throw error;
+    if (error instanceof AdpApiError && (error.details.code === "REQUEST_TIMEOUT" || error.details.api_code === "timeout"
+      || error.details.http_status === 408 || error.details.http_status === 504)) {
+      return failureResult(new AdpApiError(error.message, {
+        ...error.details, code: "REQUEST_TIMEOUT", http_status: error.details.http_status ?? 504,
+        retryable: false, acceptance_unknown: true
+      }), true);
+    }
+    return failureResult(error, true);
+  }
 }
 
 function normalizeFileUrl(value: string): string {
@@ -372,39 +421,7 @@ function normalizeFileUrl(value: string): string {
       // Invalid file URLs receive the same actionable message.
     }
   }
-  throw new Error("文件必须使用可访问的 HTTP(S) URL。本地文件请先用 upload_temporary_file 上传。");
-}
-
-function documentBody(file: FileReference): JsonObject {
-  return { file_url: file.url, ...(file.name === undefined ? {} : { file_name: file.name }) };
-}
-
-function pageOptions(args: JsonObject): JsonObject {
-  return args.pages === undefined ? {} : { model_params: { pages: args.pages } };
-}
-
-async function processDocuments(
-  args: JsonObject, execute: (file: FileReference) => Promise<JsonObject>, client: AdpClient, signal?: AbortSignal
-): Promise<JsonObject> {
-  if (args.files === undefined) {
-    const submitted = await execute({ url: normalizeFileUrl(args.file_url as string), name: args.file_name as string | undefined });
-    return waitForTask(submitted, args, client, signal);
-  }
-  if (args.file_name !== undefined) throw new Error("批量处理时请在 files 中分别提供 name。");
-
-  const files = (args.files as FileReference[]).map((file) => ({ ...file, url: normalizeFileUrl(file.url) }));
-  const schedule = limitBatchRequests();
-  const submitted = await Promise.all(files.map((file, index) => schedule(async () => {
-    signal?.throwIfAborted();
-    return { index, ...(file.name === undefined ? {} : { name: file.name }), ...await execute(file) };
-  })));
-  if (args.wait === false) return batchResult(submitted);
-
-  const deadline = waitDeadline(args);
-  const results = await Promise.all(submitted.map(async (result) => ({
-    ...result, ...await waitForTask(result, args, client, signal, deadline, schedule)
-  })));
-  return batchResult(results);
+  throw new Error("文件必须使用可访问的 HTTP(S) URL。本地文件请先用 upload_file 上传。");
 }
 
 function limitBatchRequests(): ScheduleRequest {
@@ -432,7 +449,7 @@ async function uploadFiles(args: JsonObject, client: AdpClient, signal?: AbortSi
       }
       return {
         status: "succeeded", data,
-        next_steps: [{ message: "将本项 data.download_url 填入后续工具的 files[].url。" }]
+        next_steps: [{ message: "使用本项 data.download_url 调用文档工具。" }]
       };
     } catch (error) {
       if (signal?.aborted) throw error;
@@ -440,7 +457,6 @@ async function uploadFiles(args: JsonObject, client: AdpClient, signal?: AbortSi
     }
   }
 
-  if (args.files === undefined) return upload(args.file_path as string);
   const schedule = limitBatchRequests();
   const results = await Promise.all((args.files as { file_path: string }[]).map(({ file_path }, index) =>
     schedule(async () => {
@@ -452,21 +468,17 @@ async function uploadFiles(args: JsonObject, client: AdpClient, signal?: AbortSi
 }
 
 function batchResult(files: JsonObject[]): JsonObject {
-  const statuses = files.map(({ status }) => status);
-  let status: ResultStatus = "partial_success";
-  if (statuses.includes("pending")) status = "pending";
-  else if (statuses.every((item) => item === "succeeded")) status = "succeeded";
-  else if (statuses.every((item) => item === "failed")) status = "failed";
-  else if (statuses.every((item) => item === "cancelled")) status = "cancelled";
+  const succeeded = files.filter(file => file.status === "succeeded").length;
+  const status = succeeded === files.length ? "succeeded" : succeeded === 0 ? "failed" : "partial_success";
   return { status, files };
 }
 
 async function extractDirect(
-  url: string, fields: { name: string; prompt?: string }[], client: AdpClient, signal?: AbortSignal
+  file: JsonObject, fields: { name: string; prompt?: string | null }[], client: AdpClient, signal?: AbortSignal
 ): Promise<JsonObject> {
   try {
     const envelope = await client.request(client.documentPath("/v1/app/doc/extract/direct-fast"), {
-      method: "POST", body: { file: { url }, fields }, signal
+      method: "POST", body: { file, fields }, signal
     });
     const data = envelope.data;
     if (!isObject(data) || !Array.isArray(data.extraction_result)) throw unknownReceipt("自定义抽取接口未返回抽取结果。");
@@ -479,16 +491,9 @@ async function extractDirect(
 
 async function verifyDomesticInvoice(args: JsonObject, client: AdpClient, signal?: AbortSignal): Promise<JsonObject> {
   const typeKey = (args.type_key as string | undefined) ?? defaultInvoiceType;
-  const definition = invoiceTypes.find(({ key }) => key === typeKey)!;
   const body: JsonObject = { type_key: typeKey };
   for (const field of invoiceInputFields) {
     if (typeof args[field] === "string" && args[field].trim()) body[field] = args[field].trim();
-  }
-  const missing = ["fpNumber", "fpDate", ...definition.fields].filter(field => body[field] === undefined);
-  if (missing.length) {
-    throw new AdpApiError(`${definition.label}缺少验真要素：${missing.join("、")}。请先抽取或向用户询问，不要猜测。`, {
-      code: "INVOICE_VERIFICATION_INPUT_REQUIRED", retryable: false
-    });
   }
   try {
     const envelope = await client.request(client.documentPath("/v1/app/invoice/verify"), { method: "POST", body, signal });
@@ -516,11 +521,11 @@ async function verifyDomesticInvoice(args: JsonObject, client: AdpClient, signal
 
 function taskPath(kind: TaskKind, suffix: string, client: AdpClient): string {
   const path = taskActions[kind].route + suffix;
-  return kind === "workflow" ? client.workflowPath(path) : client.documentPath(path);
+  return client.documentPath(path);
 }
 
 async function createTask(
-  kind: Exclude<TaskKind, "workflow">, body: JsonObject, client: AdpClient, signal?: AbortSignal
+  kind: TaskKind, body: JsonObject, client: AdpClient, signal?: AbortSignal
 ): Promise<JsonObject> {
   try {
     const envelope = await client.request(taskPath(kind, "/create/task", client), { method: "POST", body, signal });
@@ -537,78 +542,6 @@ async function createTask(
   }
 }
 
-function waitDeadline(args: JsonObject): number {
-  return performance.now() + ((args.wait_timeout_seconds as number | undefined) ?? defaultWaitSeconds) * 1000;
-}
-
-async function waitForTask(
-  submitted: JsonObject, args: JsonObject, client: AdpClient, signal?: AbortSignal,
-  deadline = waitDeadline(args), schedule?: ScheduleRequest
-): Promise<JsonObject> {
-  if (args.wait === false || submitted.status !== "pending" || submitted.wait_status === "paused") return submitted;
-  return pollTask(submitted.task_ref as TaskRef, submitted, deadline, client, signal, schedule);
-}
-
-async function pollTask(
-  ref: TaskRef, latest: JsonObject, deadline: number, client: AdpClient, signal?: AbortSignal,
-  schedule: ScheduleRequest = (request) => request()
-): Promise<JsonObject> {
-  const polling = new AbortController();
-  const cancel = () => polling.abort(signal?.reason);
-  if (signal?.aborted) cancel();
-  else signal?.addEventListener("abort", cancel, { once: true });
-  const timeout = setTimeout(() => polling.abort(), Math.max(0, deadline - performance.now()));
-  let interval = initialPollIntervalMs;
-  try {
-    while (!polling.signal.aborted && performance.now() < deadline) {
-      latest = await queryWithRetries(ref, client, polling.signal, deadline, schedule);
-      if (latest.status !== "pending" || latest.wait_status === "paused") return latest;
-      await delay(Math.min(interval, Math.max(0, deadline - performance.now())), undefined, { signal: polling.signal });
-      interval = Math.min(maxPollIntervalMs, Math.round(interval * 1.5));
-    }
-    signal?.throwIfAborted();
-    return waitingResult(latest, ref, "timeout");
-  } catch (error) {
-    if (signal?.aborted) throw error;
-    const timedOut = polling.signal.aborted || performance.now() >= deadline;
-    const queryError = !timedOut || (error instanceof AdpApiError && error.details.retryable === true)
-      ? errorDetails(error) : undefined;
-    return waitingResult(latest, ref, timedOut ? "timeout" : "query_failed", queryError);
-  } finally {
-    clearTimeout(timeout);
-    signal?.removeEventListener("abort", cancel);
-  }
-}
-
-async function queryWithRetries(
-  ref: TaskRef, client: AdpClient, signal: AbortSignal, deadline: number, schedule: ScheduleRequest
-): Promise<JsonObject> {
-  for (let attempt = 0; ; attempt++) {
-    try {
-      return await schedule(() => {
-        signal.throwIfAborted();
-        if (performance.now() >= deadline) throw new Error("已到查询截止时间。");
-        return queryTask(ref, client, signal);
-      });
-    } catch (error) {
-      if (signal.aborted || performance.now() >= deadline || attempt >= maxQueryRetries
-        || !(error instanceof AdpApiError) || error.details.retryable !== true) throw error;
-
-      const retryAfter = error.details.retry_after_ms;
-      const backoff = 250 * 2 ** attempt;
-      const wait = typeof retryAfter === "number" && Number.isFinite(retryAfter) && retryAfter >= 0
-        ? retryAfter : backoff + Math.random() * backoff / 2;
-      const remaining = Math.max(0, deadline - performance.now());
-      try {
-        await delay(Math.min(wait, Math.ceil(remaining)), undefined, { signal });
-      } catch {
-        throw error;
-      }
-      if (wait >= remaining) throw error;
-    }
-  }
-}
-
 async function queryExistingTask(ref: TaskRef, client: AdpClient, signal?: AbortSignal): Promise<JsonObject> {
   try {
     return await queryTask(ref, client, signal);
@@ -622,30 +555,7 @@ async function queryExistingTask(ref: TaskRef, client: AdpClient, signal?: Abort
   }
 }
 
-function resolveTaskReference(args: JsonObject): TaskRef {
-  const hasRef = args.task_ref !== undefined;
-  const hasRun = args.run_id !== undefined;
-  const hasDocument = args.task_id !== undefined || args.task_type !== undefined;
-  if (Number(hasRef) + Number(hasRun) + Number(hasDocument) !== 1) {
-    throw new Error("任务标识只能选择一种：task_ref、run_id，或 task_id 与 task_type。");
-  }
-  if (hasRef) return args.task_ref as TaskRef;
-  if (hasRun) return { kind: "workflow", id: args.run_id as string };
-  if (args.task_id === undefined || args.task_type === undefined) {
-    throw new Error("文档任务必须同时提供 task_id 和 task_type。");
-  }
-  return { kind: args.task_type as TaskKind, id: args.task_id as string };
-}
-
 async function cancelExistingTask(ref: TaskRef, client: AdpClient, signal?: AbortSignal): Promise<JsonObject> {
-  if (ref.kind === "workflow") {
-    return {
-      ...failureResult(new AdpApiError("工作流仅支持查询，暂不支持通过此工具取消。", {
-        code: "TASK_CANCELLATION_UNSUPPORTED", retryable: false
-      })), action: "cancel", task_ref: ref,
-      next_steps: [taskStep(ref, "查询原工作流的实际状态与可用结果。")]
-    };
-  }
   try {
     const envelope = await client.request(taskPath(ref.kind, `/cancel/task/${ref.id}`, client), { method: "POST", signal });
     const data = envelope.data;
@@ -697,11 +607,6 @@ function taskStatus(kind: TaskKind, status: unknown): ResultStatus | undefined {
     if (status === "failed") return "failed";
     if (status === "cancelled") return "cancelled";
     if (status === "pending" || status === "running") return "pending";
-  } else {
-    if (status === "succeeded") return "succeeded";
-    if (status === "failed" || status === "timeout") return "failed";
-    if (status === "cancelled") return "cancelled";
-    if (status === "pending" || status === "running" || status === "paused") return "pending";
   }
   return undefined;
 }
@@ -715,8 +620,16 @@ function taskResult(
       next_steps: [taskStep(ref, "使用原任务引用查询最新状态。")]
     };
   }
+  const result = { ...documentResult(envelope, data, status, client), task_ref: ref };
+  if (status === "pending") {
+    return { ...result, next_steps: [taskStep(ref, "稍后查询原任务。")] };
+  }
+  return result;
+}
+
+function documentResult(envelope: JsonObject, data: JsonObject, status: ResultStatus, client: AdpClient): JsonObject {
   const result = {
-    status, task_ref: ref, data, ...usageFields(envelope),
+    status, data, ...usageFields(envelope),
     ...(typeof envelope.message === "string" && envelope.message ? { message: envelope.message } : {})
   };
   if (status === "failed") {
@@ -724,30 +637,14 @@ function taskResult(
     const details = errorDetails(error);
     return { ...result, error: details, next_steps: [errorStep(details)] };
   }
-  if (status === "pending") {
-    return waitingResult(result, ref, data.status === "paused" ? "paused" : undefined);
-  }
   return result;
-}
-
-function waitingResult(latest: JsonObject, ref: TaskRef, status?: WaitStatus, queryError?: JsonObject): JsonObject {
-  const message = status === "paused" ? "工作流已暂停。处理待办后继续查询原任务。"
-    : status === "timeout" ? "达到本次等待上限。继续查询原任务。"
-    : status === "query_failed" ? "本次查询未完成。继续查询原任务。"
-    : "稍后查询原任务。";
-  return {
-    ...latest,
-    ...(status ? { wait_status: status } : {}),
-    ...(queryError ? { query_error: queryError } : {}),
-    next_steps: [taskStep(ref, message, queryError)]
-  };
 }
 
 function taskStep(ref: TaskRef, message: string, queryError?: JsonObject): JsonObject {
   const retryAfter = queryError?.retry_after_ms;
   const stepMessage = typeof retryAfter === "number" && Number.isFinite(retryAfter) && retryAfter > 0
     ? `${message} 请等待至少 ${Math.ceil(retryAfter / 1000)} 秒再查询。` : message;
-  return { message: stepMessage, tool: "task", arguments: { task_ref: ref } };
+  return { message: stepMessage, tool: "get_task", arguments: { task_ref: ref } };
 }
 
 function usageFields(envelope: JsonObject): JsonObject {
@@ -768,6 +665,11 @@ function requireData(envelope: JsonObject): JsonObject {
   return envelope.data;
 }
 
+function mutationData(envelope: JsonObject): JsonObject {
+  if (!isObject(envelope.data)) throw unknownReceipt("应用变更接口未返回确认结果，请先查询原应用。");
+  return envelope.data;
+}
+
 function isObject(value: unknown): value is JsonObject {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
@@ -777,8 +679,11 @@ function errorDetails(error: unknown): JsonObject {
   return { message: error instanceof Error && error.message ? error.message : "ADP 调用失败。" };
 }
 
-function unknownReceipt(message: string): AdpApiError {
-  return new AdpApiError(message, { code: "RECEIPT_MISSING", acceptance_unknown: true, retryable: false });
+function unknownReceipt(message: string, httpStatus?: number): AdpApiError {
+  return new AdpApiError(message, {
+    code: "RECEIPT_MISSING", acceptance_unknown: true, retryable: false,
+    ...(httpStatus === undefined ? {} : { http_status: httpStatus })
+  });
 }
 
 function errorStep(error: JsonObject): JsonObject {
@@ -796,8 +701,6 @@ function errorStep(error: JsonObject): JsonObject {
       return { message: "在 API Key 对应的区域补充积分后继续。" };
     case "TASK_NOT_AVAILABLE":
       return { message: "核对原任务引用、区域及当前账号。" };
-    case "ATTACHMENT_AUTHORIZATION_REQUIRED":
-      return { message: "取得用户对附件的明确授权，或仅提交文字反馈。" };
     case "TASK_FAILED":
       return { message: "先核对原任务的失败原因，再决定如何处理。" };
     default:

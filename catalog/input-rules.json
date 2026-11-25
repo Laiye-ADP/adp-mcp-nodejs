@@ -1,0 +1,355 @@
+{
+  "$defs": {
+    "number_format": {
+      "anyOf": [
+        {"type": "null"},
+        {
+          "type": "object",
+          "properties": {
+            "mode": {"const": "custom"},
+            "instruction": {"type": "string", "minLength": 1, "pattern": "\\S"}
+          },
+          "required": ["mode", "instruction"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "mode": {"const": "preset"},
+            "preset": {"enum": ["integer", "grouped_integer"]},
+            "rounding": {"enum": ["half_up", "truncate"]}
+          },
+          "required": ["mode", "preset"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "mode": {"const": "preset"},
+            "preset": {"enum": ["decimal", "grouped_decimal"]},
+            "decimal_places": {"type": "integer", "minimum": 0},
+            "rounding": {"enum": ["half_up", "truncate"]}
+          },
+          "required": ["mode", "preset"],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "date_format": {
+      "anyOf": [
+        {"type": "null"},
+        {
+          "type": "object",
+          "properties": {
+            "mode": {"const": "custom"},
+            "instruction": {"type": "string", "minLength": 1, "pattern": "\\S"}
+          },
+          "required": ["mode", "instruction"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "mode": {"const": "preset"},
+            "preset": {"enum": ["date_iso", "date_slash", "date_cn", "datetime"]}
+          },
+          "required": ["mode", "preset"],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "column": {
+      "type": "object",
+      "properties": {
+        "field_key": {"type": "string"},
+        "field_name": {"type": "string", "minLength": 1, "pattern": "\\S", "maxLength": 50},
+        "field_type": {"enum": ["string", "number", "date"]},
+        "field_prompt": {"type": ["string", "null"], "maxLength": 3000},
+        "format": {"anyOf": [{"$ref": "#/$defs/number_format"}, {"$ref": "#/$defs/date_format"}]}
+      },
+      "required": ["field_name"],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {"required": ["field_type"], "properties": {"field_type": {"const": "number"}}},
+          "then": {"properties": {"format": {"$ref": "#/$defs/number_format"}}}
+        },
+        {
+          "if": {"required": ["field_type"], "properties": {"field_type": {"const": "date"}}},
+          "then": {"properties": {"format": {"$ref": "#/$defs/date_format"}}}
+        },
+        {
+          "if": {"not": {"anyOf": [{"required": ["field_type"]}]}},
+          "then": {"properties": {"format": {"type": "null"}}}
+        },
+        {
+          "if": {"required": ["field_type"], "properties": {"field_type": {"const": "string"}}},
+          "then": {"properties": {"format": {"type": "null"}}}
+        }
+      ]
+    },
+    "field": {
+      "type": "object",
+      "properties": {
+        "field_key": {"type": "string"},
+        "field_name": {"type": "string", "minLength": 1, "pattern": "\\S", "maxLength": 50},
+        "field_type": {"enum": ["string", "number", "date", "table"]},
+        "field_prompt": {"type": ["string", "null"], "maxLength": 3000},
+        "format": {"anyOf": [{"$ref": "#/$defs/number_format"}, {"$ref": "#/$defs/date_format"}]},
+        "sub_fields": {"type": "array", "minItems": 1, "maxItems": 30, "items": {"$ref": "#/$defs/column"}}
+      },
+      "required": ["field_name", "field_type"],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {"required": ["field_type"], "properties": {"field_type": {"const": "number"}}},
+          "then": {"properties": {"format": {"$ref": "#/$defs/number_format"}}}
+        },
+        {
+          "if": {"required": ["field_type"], "properties": {"field_type": {"const": "date"}}},
+          "then": {"properties": {"format": {"$ref": "#/$defs/date_format"}}}
+        },
+        {
+          "if": {"not": {"anyOf": [{"required": ["field_type"]}]}},
+          "then": {"properties": {"format": {"type": "null"}}}
+        },
+        {
+          "if": {"required": ["field_type"], "properties": {"field_type": {"const": "string"}}},
+          "then": {"properties": {"format": {"type": "null"}}}
+        },
+        {
+          "if": {"required": ["field_type"], "properties": {"field_type": {"const": "table"}}},
+          "then": {
+            "required": ["sub_fields"],
+            "properties": {"field_prompt": {"type": "null"}, "format": {"type": "null"}}
+          }
+        },
+        {
+          "if": {"required": ["sub_fields"]},
+          "then": {"properties": {"field_type": {"const": "table"}}}
+        }
+      ]
+    }
+  },
+  "parse_document": {
+    "if": {
+      "required": ["recognize_mode"],
+      "properties": {"recognize_mode": {"enum": ["fast_vlm", "thai_ocr"]}}
+    },
+    "then": {"properties": {"remove_header_footer": {"const": false}}},
+    "not": {
+      "required": ["recognize_mode", "enable_highlight"],
+      "properties": {"recognize_mode": {"const": "thai_ocr"}, "enable_highlight": {"const": 1}}
+    },
+    "oneOf": [{"required": ["file_url"]}, {"required": ["file_base64"]}]
+  },
+  "extract_document": {
+    "oneOf": [
+      {
+        "required": ["app_id"],
+        "not": {"anyOf": [{"required": ["file"]}, {"required": ["fields"]}]},
+        "anyOf": [{"required": ["file_url"]}, {"required": ["file_base64"]}],
+        "if": {
+          "required": ["file_url"],
+          "properties": {"file_url": {"pattern": "^[Jj][Oo][Bb][Ii][Dd]:"}}
+        },
+        "then": {"not": {"required": ["file_base64"]}}
+      },
+      {
+        "required": ["fields", "file"],
+        "not": {
+          "anyOf": [
+            {"required": ["app_id"]},
+            {"required": ["file_url"]},
+            {"required": ["file_base64"]},
+            {"required": ["file_name"]},
+            {"required": ["pages"]},
+            {"required": ["with_rec_result"]},
+            {"required": ["enable_multi_ticket"]},
+            {"required": ["enable_invoice_verify"]},
+            {"required": ["enable_field_value_translation"]},
+            {"required": ["enable_highlight"]},
+            {"required": ["enable_confidence"]},
+            {"required": ["wait"]},
+            {"required": ["wait_timeout_seconds"]}
+          ]
+        }
+      }
+    ],
+    "properties": {
+      "file": {
+        "type": "object",
+        "properties": {
+          "url": {"type": "string", "format": "uri", "pattern": "^https?://[^\\s]+$"},
+          "base64": {"type": "string", "minLength": 1, "pattern": "\\S", "contentEncoding": "base64"}
+        },
+        "additionalProperties": false,
+        "oneOf": [{"required": ["url"]}, {"required": ["base64"]}]
+      },
+      "fields": {
+        "type": "array",
+        "minItems": 1,
+        "maxItems": 20,
+        "uniqueItems": true,
+        "items": {
+          "type": "object",
+          "properties": {
+            "name": {"type": "string", "minLength": 1, "pattern": "\\S"},
+            "prompt": {"type": ["string", "null"]}
+          },
+          "required": ["name"],
+          "additionalProperties": false
+        }
+      }
+    }
+  },
+  "classify_document": {"oneOf": [{"required": ["file_url"]}, {"required": ["file_base64"]}]},
+  "create_extraction_app": {
+    "oneOf": [
+      {
+        "required": ["extract_fields"],
+        "properties": {"ai_function": {"const": 1425}},
+        "not": {"required": ["classify_types"]}
+      },
+      {
+        "required": ["ai_function", "classify_types"],
+        "properties": {
+          "ai_function": {"const": 1426},
+          "extract_fields": false,
+          "app_code": false,
+          "app_label": false,
+          "enable_highlight": false,
+          "enable_field_value_translation": false,
+          "enable_confidence": false
+        }
+      }
+    ],
+    "properties": {
+      "extract_fields": {
+        "type": "array",
+        "minItems": 1,
+        "maxItems": 110,
+        "items": {
+          "$ref": "#/$defs/field",
+          "type": "object",
+          "required": ["field_key"],
+          "properties": {
+            "field_key": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_]{0,63}$"},
+            "sub_fields": {
+              "items": {
+                "type": "object",
+                "required": ["field_key"],
+                "properties": {"field_key": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_]{0,63}$"}}
+              }
+            }
+          }
+        },
+        "allOf": [
+          {
+            "contains": {
+              "type": "object",
+              "required": ["field_type"],
+              "properties": {"field_type": {"const": "table"}}
+            },
+            "minContains": 0,
+            "maxContains": 10
+          },
+          {
+            "contains": {
+              "not": {
+                "type": "object",
+                "required": ["field_type"],
+                "properties": {"field_type": {"const": "table"}}
+              }
+            },
+            "minContains": 0,
+            "maxContains": 100
+          }
+        ]
+      },
+      "app_code": {"type": ["string", "null"], "maxLength": 64},
+      "app_label": {"type": ["array", "null"], "maxItems": 5, "items": {"type": "string"}}
+    }
+  },
+  "update_extraction_app": {
+    "anyOf": [{"required": ["app_name"]}, {"required": ["description"]}, {"required": ["extract_fields"]}],
+    "dependentRequired": {"config_version": ["extract_fields"]},
+    "properties": {
+      "extract_fields": {"type": "array", "minItems": 1, "maxItems": 110, "items": {"$ref": "#/$defs/field"}}
+    }
+  },
+  "list_apps": {
+    "if": {"required": ["document_type"]},
+    "then": {"properties": {"engine_type": {"const": "extract"}}}
+  },
+  "verify_invoice": {
+    "allOf": [
+      {
+        "if": {
+          "required": ["type_key"],
+          "properties": {
+            "type_key": {
+              "enum": [
+                "vat_special_invoice",
+                "vat_electronic_special_invoice",
+                "motor_vehicle_sale_invoice"
+              ]
+            }
+          }
+        },
+        "then": {"required": ["fpCode", "fpNoTaxAmount"]}
+      },
+      {
+        "if": {
+          "required": ["type_key"],
+          "properties": {
+            "type_key": {"enum": ["vat_common_invoice", "vat_electronic_invoice", "vat_roll_invoice"]}
+          }
+        },
+        "then": {"required": ["fpCode", "fpCRC"]}
+      },
+      {
+        "if": {
+          "properties": {
+            "type_key": {
+              "enum": [
+                "vat_electronic_special_invoice_new",
+                "vat_electronic_invoice_new",
+                "electronic_air_transport",
+                "electronic_train_ticket"
+              ]
+            }
+          }
+        },
+        "then": {"required": ["fpAmount"]}
+      },
+      {
+        "if": {
+          "required": ["type_key"],
+          "properties": {"type_key": {"enum": ["used_car_purchase_invoice"]}}
+        },
+        "then": {"required": ["fpCode", "fpAmount"]}
+      }
+    ]
+  },
+  "get_task": {
+    "oneOf": [
+      {
+        "required": ["task_ref"],
+        "properties": {"task_ref": {"required": ["kind", "id"]}},
+        "not": {"anyOf": [{"required": ["task_id"]}, {"required": ["task_type"]}]}
+      },
+      {"required": ["task_id", "task_type"], "not": {"required": ["task_ref"]}}
+    ]
+  },
+  "cancel_task": {
+    "oneOf": [
+      {
+        "required": ["task_ref"],
+        "properties": {"task_ref": {"required": ["kind", "id"]}},
+        "not": {"anyOf": [{"required": ["task_id"]}, {"required": ["task_type"]}]}
+      },
+      {"required": ["task_id", "task_type"], "not": {"required": ["task_ref"]}}
+    ]
+  }
+}

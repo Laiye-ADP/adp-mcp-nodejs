@@ -1,17 +1,21 @@
 import { createHash } from "node:crypto";
 import { openAsBlob } from "node:fs";
 import { stat } from "node:fs/promises";
-import { basename, extname } from "node:path";
+import { basename, extname, isAbsolute } from "node:path";
 import { fileURLToPath } from "node:url";
 import { readCliCredentials } from "./cli-credentials.js";
 
 export type JsonObject = Record<string, unknown>;
 export type AdpRegion = "cn" | "global";
+export type GuideWorkspace = AdpRegion | "private" | "unknown";
 export type RegionCache = Map<string, Promise<AdpRegion>>;
 
 type RequestOptions = {
   method?: "GET" | "POST";
   body?: JsonObject | FormData;
+  query?: Record<string, string>;
+  timeoutMs?: number;
+  rawResponse?: boolean;
   signal?: AbortSignal;
 };
 
@@ -26,6 +30,7 @@ type Connection = {
   origin: string;
   tenant: string;
   region: AdpRegion;
+  guideWorkspace: GuideWorkspace;
   apiKey?: string;
   discoverRegion?: boolean;
 };
@@ -130,6 +135,10 @@ export class AdpClient {
     return this.#catalogRegionConfirmed;
   }
 
+  get guideWorkspace(): GuideWorkspace {
+    return this.#catalogRegionConfirmed ? this.#getConnection().guideWorkspace : "unknown";
+  }
+
   get domesticInvoiceRegionConfirmed(): boolean {
     if (!this.#catalogRegionConfirmed) return false;
     const connection = this.#getConnection();
@@ -170,7 +179,7 @@ export class AdpClient {
     const region = await discovery;
     signal?.throwIfAborted();
     this.#connection = {
-      ...connection, region, origin: region === "global" ? GLOBAL_BASE_URL : DOMESTIC_BASE_URL, discoverRegion: false
+      ...connection, region, guideWorkspace: region, origin: region === "global" ? GLOBAL_BASE_URL : DOMESTIC_BASE_URL, discoverRegion: false
     };
     return region;
   }
@@ -223,7 +232,9 @@ export class AdpClient {
     }
     await this.prepareConnection(options.signal);
     const connection = this.#getConnection();
-    return (await this.#requestAt(connection, new URL(url.pathname, connection.origin), options, DEFAULT_REQUEST_TIMEOUT_MS)).result;
+    const target = new URL(url.pathname, connection.origin);
+    target.search = new URLSearchParams(options.query).toString();
+    return (await this.#requestAt(connection, target, options, options.timeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS)).result;
   }
 
   async #requestAt(connection: Connection, url: URL, options: RequestOptions, timeoutMs: number) {
@@ -268,7 +279,8 @@ export class AdpClient {
     }
 
     const result = parseObject(raw);
-    if (!response.ok || (result && (result.error != null || !isSuccessCode(result.code)))) {
+    if (!response.ok || (result && (result.error != null ||
+        ((!options.rawResponse || result.code !== undefined) && !isSuccessCode(result.code))))) {
       throw this.#responseError(response, result, connection.origin, method);
     }
     if (!result) {
@@ -315,6 +327,7 @@ export class AdpClient {
     let file: Blob;
     try {
       path = /^file:/i.test(filePath) ? fileURLToPath(filePath) : filePath;
+      if (!isAbsolute(path)) throw new Error("Expected an absolute file path");
       const info = await stat(path);
       if (!info.isFile() || !info.size) throw new Error("Invalid local file");
       file = await openAsBlob(path, { type: mimeTypeFor(path) });
@@ -373,10 +386,12 @@ export class AdpClient {
       }
     }
     const origin = this.#origin(baseUrl || (region === "global" ? GLOBAL_BASE_URL : DOMESTIC_BASE_URL));
+    const cloud = officialRegion(origin);
     return this.#connection = {
       origin,
       tenant: tenant || "laiye",
-      region: officialRegion(origin) ?? (region === "global" ? "global" : "cn"),
+      region: cloud ?? (region === "global" ? "global" : "cn"),
+      guideWorkspace: baseUrl || region ? cloud ?? "private" : "unknown",
       apiKey,
       discoverRegion: !!apiKey && !baseUrl && !region && (!tenant || tenant === "laiye")
     };
@@ -410,7 +425,7 @@ export class AdpClient {
         { code: "CLI_CREDENTIAL_TARGET_MISMATCH", retryable: false },
       );
     }
-    return { origin, tenant: profile.tenant, region: profileRegion ?? region ?? "cn", apiKey: profile.apiKey };
+    return { origin, tenant: profile.tenant, region: profileRegion ?? region ?? "cn", guideWorkspace: profileRegion ?? "private", apiKey: profile.apiKey };
   }
 
   #origin(baseUrl: string): string {
@@ -550,8 +565,8 @@ export class AdpClient {
 
   #withUnknownAcceptance(message: string): string {
     return message + this.#text(
-      "提交结果可能未知。请先核对已有任务，避免重复提交。",
-      " Request acceptance may be unknown. Check for an existing task before submitting again.",
+      "处理结果可能未知。请先核对调用记录，避免重复提交。",
+      " The outcome may be unknown. Check the call record before submitting again.",
     );
   }
 

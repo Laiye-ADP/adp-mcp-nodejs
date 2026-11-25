@@ -1,10 +1,10 @@
 # 来也 ADP MCP · Node.js
 
-在支持 MCP stdio 的客户端处理本地或线上文档。可上传文件、解析全文、抽取字段和按文种分类。工具 `get_adp_guide` 会列出当前区域可用的预制应用和调用示例。
+在支持 MCP stdio 的客户端处理本地或线上文档。可上传文件、解析全文、抽取字段和按文档类型分类。按文档类型查找预置或自定义应用可使用 `list_apps`。`get_adp_guide` 帮助选择全文解析、一次性字段抽取或可复用的抽取规则。
 
 ## 快速接入
 
-需要 Node.js 20+。把下面的配置加入 MCP 客户端，用现有 API Key 替换占位值并连接。通过 `get_adp_guide({})` 确认区域和可用预制应用。
+需要 Node.js 20+。把下面的配置加入 MCP 客户端，用现有 API Key 替换占位值并连接。连接后用 `tools/list` 查看当前连接的工具目录。
 
 ```json
 {
@@ -27,91 +27,67 @@
 
 - 公有云仅配置 Key 时，优先复用 CLI 为同一个 Key 保存的公有云地址和租户。否则，默认租户 `laiye` 首次通过只读鉴权识别区域。先检查中国区，只有收到 `404 Accessor not found` 才检查全球区。成功后同一 MCP 进程复用该结果。识别过程无需查积分或提交业务任务。
 - 可用 `ADP_REGION=cn` 或 `ADP_REGION=global` 直接选择官方区域，也可用 `ADP_API_BASE_URL` 指定服务根地址。专有部署同时设置 `ADP_TENANT_NAME`。未显式传 Key 时，连接配置须与保存的 CLI 配置匹配。
-- `ADP_ACCEPT_LANGUAGE` 控制响应语言。地区识别失败时，引导会标明区域尚未确认。 [连通性与鉴权自检](https://adp-doc.laiye.com/api-reference/troubleshooting)
+- `ADP_ACCEPT_LANGUAGE` 控制工具显示名称、描述、参数说明、指南和业务响应的语言。需要指定区域时，显式设置 `ADP_REGION`。 [连通性与鉴权自检](https://adp-doc.laiye.com/api-reference/troubleshooting)
 
-## 示例：上传、抽取、续查
+## 从文件到结果
 
-以下参数依次传给 MCP 客户端里的对应工具。已有可访问的 HTTP(S) 文件链接时，可以直接从第二步开始。
-
-1. 调用 `upload_temporary_file`。本地路径和 `file:///` 地址均可。
+1. 已有可下载的 HTTP(S) 地址可直接使用。本地文件先交给 `upload_file`，从上传回执取出 `files[0].data.download_url`。
 
    ```json
-   {"files":[{"file_path":"D:/Documents/invoice.pdf"}]}
+   {"files":[{"file_path":"D:/Documents/contract.pdf"}]}
    ```
 
-2. 用上传响应的 `files[0].data.download_url` 调用 `extract_document`。下例使用两区都支持的海外发票国际通用高速版。其他文种的 `app_id` 用 `get_adp_guide` 查。
+2. 按用户需要选择工具。要阅读或翻译全文，用 `parse_document`，例如 `{"file_url":"<download_url>"}`。只要本次指定的字段，用 `extract_document`，一次调用处理一份文档并同步返回字段值。
 
    ```json
-   {
-     "app_id": "ootb_r3s6t9u2v5w8x1y4z7a0b3c6d9e2",
-     "files": [{"url": "<download_url>"}],
-     "wait": false
-   }
+   {"file_url":"<download_url>","fields":[{"name":"合同金额","prompt":"含税总金额"},{"name":"签署日期"}]}
    ```
 
-3. 将对应文件的 `files[i].task_ref` 完整传给 `task`。使用 `next_steps` 中的续查参数也可以。
+3. 用户要求按文档类型抽取且没有点名字段时，可先用 `list_apps` 搜索预置，如 `{"engine_type":"extract","source":"preset","document_type":"采购订单"}`。从 `data.list` 取得匹配的 `app_id`，再调用 `extract_document`。用户已指定自定义抽取应用时，可直接使用该应用的 ID。
 
    ```json
-   {"task_ref":{"kind":"extract","id":"<id-from-task_ref>"}}
+   {"app_id":"<app_id>","file_url":"<download_url>","wait":false}
    ```
 
-`task` 默认 `action: "query"`。任务标识三选一：完整 `task_ref`、工作流 `run_id`，或文档 `task_id` 与 `task_type`（`parse`、`extract`、`classify`）。需要取消时显式传 `action: "cancel"`。
+4. 提交后台处理后，将顶层 `task_ref` 原样交给 `get_task`。例如 `{"task_ref":{"kind":"extract","id":"<task_id>"}}`。同一引用也可交给 `cancel_task`，取消仍在排队、尚未被领取的任务。
 
-```json
-{"action":"cancel","task_ref":{"kind":"extract","id":"<id-from-task_ref>"}}
-```
+解析、按应用抽取和分类默认以 `wait=true` 在本次调用中返回最终结果。`wait_timeout_seconds` 设置等待同步响应的时间，默认 60 秒。同步请求超时后，处理结果未知，请先核对本次调用。需要后台处理时传 `wait=false`，保存每份文件对应的 `task_ref`。
 
-仅可取消尚未被领取的待执行文档任务，工作流仅支持查询。取消成功返回 `status: "succeeded"`，任务实际状态以 `data.status` 为准；未能取消时保留实际状态并返回 `TASK_NOT_CANCELLABLE`。查询已取消任务返回 `status: "cancelled"`，不视为工具错误。查询和取消始终使用原任务，不重新提交。
-
-### 其他常见任务
-
-- **解析全文**用 `parse_document`，支持 `standard`、`advance`、`agentic_v2` 和 `thai_ocr`。`pages` 选填，省略或传 `[]` 时处理全部页面。
-- **按指定字段抽取**用 `extract_custom_document`，传 `files` 和 `fields`。每个字段填唯一的 `name`，可加 `prompt`，同步返回结果。
-- **识别混合文种**用 `route_document`，传入已有分类应用的 `app_id` 和 `files`。返回各文种片段和页码。 [分类应用说明](https://adp-doc.laiye.com/api-reference/adp-api/document-classification/overview)
-- **提交反馈**用 `submit_user_feedback`。传 `feedback_type` 和 `content`。经用户明确授权后可附本地材料。
-
-两区都支持通用文档解析、采购订单及三种海外发票和收据预制抽取。中国区另外提供国内通用票据和卡证。区域专属工具和参数以当前连接的工具定义为准。
-
-### 批量、状态和用量
-
-- 上传、解析、抽取和分类每次支持 1–20 份文件，每次调用最多 3 个 OpenAPI 请求同时进行，包含适用的任务轮询。结果按输入顺序放在 `files[]`。逐项查看 `status`、`data`、`task_ref` 或 `error`。抽取成功后从对应结果的 `data.extraction_result` 读业务内容。
-- 解析、预制抽取和分类默认在提交后最多等待 60 秒。可用 `wait_timeout_seconds` 调整，或用 `wait: false` 在提交后返回任务引用。
-- 用量以服务端返回为准。`usage` 可包含页数 `num_pages`、已记录积分 `credits_consumed` 和分项 `billing_breakdown`。`usage_status: "unavailable"` 表示该次响应没有可用的积分金额。账号并发与请求速率由 ADP 单独限制。 [速率、并发与超时](https://adp-doc.laiye.com/api-reference/rate-limits) · [调用记录与遥测](https://adp-doc.laiye.com/api-reference/data-and-telemetry)
+`get_credits` 用于查询账户余额。单次用量取自该任务回执中的 `usage.credits_consumed` 或 `recorded_credits`。当 `usage_status` 为 `unavailable`，表示本次响应未提供已记录的积分金额。[速率、并发与超时](https://adp-doc.laiye.com/api-reference/rate-limits) · [调用记录与遥测](https://adp-doc.laiye.com/api-reference/data-and-telemetry)
 
 ## 工具目录
 
 <!-- tool-catalog:start -->
 
-版本 `2.0.0-beta.2`，下表列出两区通用的 **8** 个工具。区域专属工具和参数以当前连接的工具定义为准。
+版本 `2.0.0-beta.2`，下表列出两区通用的 **14** 个工具。区域专属工具和参数以当前连接的工具定义为准。
 
 | 工具 | 必填参数 | 用途 |
 | --- | --- | --- |
-| `get_adp_guide` | 无 | 获取与当前 MCP 连接版本和区域对应的 ADP 引导说明。正文包含预制应用名称与 app_id 对照表、文件上传步骤和文档处理调用示例。 |
-| `upload_temporary_file` | `files` | 将本机路径放入 files，每项填写 file_path，单文件也传一项。上传成功后从 files[].data 取 download_url。已有可访问的 HTTP(S) 文件地址时可直接用于业务工具。 |
-| `parse_document` | `files` | 需要阅读、检索或处理文档全文时使用。将文件地址放入 files，返回逐页文本和文档结构。可用 recognize_mode 选择解析模式，或用 pages 指定要解析的原始页码。 |
-| `extract_document` | `files`、`app_id` | 已知文种且预制字段满足需求时使用。从 get_adp_guide 选取当前区域的预制 app_id，传入文件地址并获取结构化业务字段。选填开关按预制应用支持范围生效。 |
-| `extract_custom_document` | `files`、`fields` | 预制应用未覆盖文种或所需字段时使用。传入文件地址和本次要抽取的 fields，每个字段提供 name，可选 prompt。同步返回这些字段的结构化结果。 |
-| `route_document` | `files`、`app_id` | 文种未知或同一文件混有多种文档时使用。传入已有分类应用的 app_id 和文件地址，返回分类片段的文种、原始页码及未分类页。需要继续抽取时，按分类结果选择抽取工具。 |
-| `task` | `task_ref`、`run_id` 或 `task_id` + `task_type`（三选一） | 查询异步任务的状态、可用结果和用量，或取消任务。传入 task_ref、run_id 或 task_id 与 task_type 中的一种。action 默认为 query。仅取消尚未被领取的待执行文档任务，工作流支持查询。 |
-| `submit_user_feedback` | `feedback_type`、`content` | 提交用户的使用问题（issue）或改进建议（suggestion）。传入去除凭证和无关敏感信息的事实摘要，成功返回反馈编号。可附上用户明确同意提交的本地材料。 |
+| `get_adp_guide` | 无 | 当前对话首次使用 ADP 时，建议查阅这份业务指南。后续任务可直接复用已读内容。结合发票、订单、证照和合同等场景，判断何时解析全文、抽取字段或按页分类，以及何时复用或创建应用。也可查阅支持的文件格式、同步与异步的选择、并发与限流、积分查询与充值，以及向 ADP 提交反馈的方式。 |
+| `upload_file` | `files` | 将文件上传到 ADP，返回可用于解析、抽取或分类的下载地址。已有可下载的 HTTP(S) 文件地址时，可跳过上传。 |
+| `parse_document` | （`file_url` 或 `file_base64`） | 将一份文档的全文或指定原始页解析为正文、表格和版面结构，供阅读、翻译或构建知识库。默认使用增强解析 2.0（fast_vlm），可切换解析模式、去除页眉页脚和页码，或识别并提取印章。开启去除页眉页脚且未指定模式时，使用智能解析 2.0（agentic_v2）。用户说“OCR”且只要金额、证件号等字段值时，用 extract_document。默认同步解析并返回结果。需要后台处理时传 wait=false，随后用返回的 task_ref 调用 get_task。 |
+| `extract_document` | （`file_url` 或 `file_base64`） + （`app_id` 或 `fields`） | 从一份文档提取字段值，例如身份证上的姓名、合同中的付款期限。根据用户是否指定抽取应用、字段或文档类型选择用法。<br><br>**指定了抽取应用。** 已知 `app_id` 时，直接传入该 ID 和文件。用户点名团队应用时，调用 `list_apps`，传 `engine_type=extract`、`source=custom` 和 `app_name`。只给应用名且来源不明时，按名称和业务类型搜索两种来源。同名结果无法区分时请用户选择。用户同时点名字段时，按应用规则抽取，只展示指定字段。<br><br>**一次性抽取。** 用户明确本次要哪些字段、且未指定应用时，直接传文件和 `fields`（1–20 个），同步返回字段值，无需查询应用目录。例如“这次只要合同的付款期限和违约金”。<br><br>**只给文档类型。** 例如“帮我抽取这张身份证”，用 `list_apps` 传 `engine_type=extract`、`source=preset` 和 `document_type`，再用返回的 `app_id` 抽取。若没有匹配预置，可按文档内容和用途选定本次字段。仍不明确时询问用户。<br><br>抽取完成后按实际返回的字段作答，缺失的字段如实说明。用户还要求整页原文、Markdown 或版面时，再调用 `parse_document`。<br><br>**专业抽取（自定义抽取应用）。** 用户对准确率、处理速度、跨版式一致性有明确要求，或需长期复用规则时，可推荐自定义抽取应用。用户决定创建后，用 `create_extraction_app` 保存字段类型、取值规则和输出格式，再用返回的 `app_id` 在代表性样本上验证效果和耗时。<br><br>按 `app_id` 抽取默认同步。需要后台处理时，传 `app_id` 和 `wait=false`，再用返回的 `task_ref` 调用 `get_task`。一次性 `fields` 仅支持同步。如果用户既限定一次性字段、又要求后台任务，请说明可选同步字段抽取或允许使用抽取应用后异步处理，请用户选择。 |
+| `classify_document` | `app_id` + （`file_url` 或 `file_base64`） | 需要判断文件的文档类型（如发票、合同），或找出混合文件中每份材料所在的页面时，调用此工具。<br><br>1. **选择分类应用**。使用当前账号创建、且包含所需类别的分类应用 `app_id`。如果当前连接的 `list_apps` 支持分类筛选，可按 `engine_type=classify` 查找。没有合适的应用时，用 `create_extraction_app` 传入 `ai_function=1426`、应用名称和 `classify_types` 创建分类应用，再使用返回的 `app_id`。<br>2. **提交文件**。传入 `app_id` 和一份文件，例如用 `file_url` 提供下载地址。省略 `pages` 时分类整份文件，传 `pages=[2, 4]` 时只分类原文件第 2、4 页。多份文件逐份调用，按文件汇总。默认同步返回，需要稍后取结果时传 `wait=false`，再用返回的 `task_ref` 调用 `get_task`。<br>3. **解读结果**。`data.segments` 按材料列出文档类型和原始页码，`data.unclassified_pages` 列出本次未能归类的页码。用户要定位混合材料时，按材料报告即可。用户要整份文件的单一文档类型时，应分类全部页面。若所有页面均归入同一类别，报告该类别。若命中多个类别或有未分类页，列明相应页码，并将整份文件的文档类型标为待确认。 |
+| `create_extraction_app` | `app_name` + （`extract_fields` 或 `ai_function` + `classify_types`） | 需要保存可复用的抽取或分类规则，或准备分类文件却没有合适的分类应用时，调用此工具。用 `app_name` 指定名称，可用 `description` 说明用途。<br><br>1. **抽取应用**。反复从同类文档提取相同字段时，使用 `ai_function=1425`（默认）。用 `extract_fields` 定义字段名称、类型和抽取提示词，例如发票号码、开票日期和价税合计。创建后，将返回的 `app_id` 和文件传给 `extract_document`。只临时提取几个字段时，可直接用 `extract_document` 的 `fields`。<br>2. **分类应用**。需要识别一份文件包含哪些材料、每份材料在原文件的哪几页时，使用 `ai_function=1426`。用 `classify_types` 定义要识别的类别，例如发票、合同和付款凭证。创建后，将返回的 `app_id` 和文件传给 `classify_document`。 |
+| `update_extraction_app` | `app_id` + （`app_name` 或 `description` 或 `extract_fields`） | 按 app_id 修改有权管理的自定义抽取应用。只改名称或说明时直接提交该项。增删或修改字段时，先用 get_app 取得完整的 extract_fields，改动目标字段，并连同要保留的字段一起提交。返回应用 ID 和更新结果。 |
+| `delete_extraction_app` | `app_id` | 按 app_id 删除有权管理的自定义抽取应用及其关联配置和抽取数据，返回删除结果。仅在用户明确要求删除整个抽取应用时调用。只知道名称时用 list_apps 按 engine_type=extract 和 source=custom 查找，有重名时核实目标。要停止一次排队中的文档任务时用 cancel_task。 |
+| `list_apps` | 无 | 分页列出当前账号可访问的抽取、解析和分类应用，返回名称、`app_id`、业务类型和来源。查找特定应用时，在本次查询中传入用户已给出的条件。<br><br>- 用户点名团队抽取应用时，传 `app_name`、`engine_type=extract` 和 `source=custom`。例如“用我们团队的采购合同应用”，传 `{"app_name":"采购合同","engine_type":"extract","source":"custom"}`。<br>- 用户只给应用名称时，传 `app_name` 和已知的业务类型，省略 `source` 以同时查预置和自定义应用。<br>- 用户只给文档类型并希望抽取时，传 `document_type`、`engine_type=extract` 和 `source=preset`。<br><br>用户要浏览全部应用时可传 `{}`，按需分页。已知 `app_id` 且需要详情时用 `get_app`。 |
+| `get_app` | `app_id` | 确认应用详细配置时调用。可通过`app_id`查询抽取应用的详细信息，包含应用名称、描述、字段配置（抽取字段、字段类型与抽取提示词）、配置版本、解析模式等。 |
+| `get_task` | （`task_ref` 或 `task_id` + `task_type`） | 获取一个文档解析、抽取或分类任务的状态、可用结果和已记录的积分消耗。异步提交后，将原调用返回的 task_ref 原样传入。使用单独记录的任务 ID 时，同时传 task_id 和 task_type。 |
+| `cancel_task` | （`task_ref` 或 `task_id` + `task_type`） | 用户要求停止处理时，取消一个仍在排队且尚未被工作节点领取的解析、抽取或分类任务。传原调用返回的 task_ref，或同时传 task_id 和 task_type。顶层 status 表示取消操作的结果，data.status 表示任务的状态。无法确认取消结果时，用原引用调用 get_task。 |
+| `get_credits` | 无 | 查询当前授权账号的积分汇总，返回总积分、已用积分、已过期积分和剩余积分。适合回答“账号还剩多少积分”。要查某次文档处理的用量，读取任务结果中的 `usage`，异步任务可用 `get_task` 续查。 |
+| `submit_user_feedback` | `feedback_type` + `content` | 当用户明确要求或同意向 ADP 提交使用问题、功能需求或改进建议时，调用此工具。提交反馈类型、问题摘要和相关业务背景。仅在用户明确授权后附带指定的运行日志、抽取配置或运行文件，并按需关联可用于跟进的联系方式。返回提交状态，以及接口提供的反馈编号。 |
 
 <!-- tool-catalog:end -->
 
-## 版本与源码运行
+## 从源码运行
 
-- `2.0.0-beta.2` 带来现有 Key 自动选区、中国区和全球区预制目录、批量文件参数和结果续查说明，以及 60 秒默认等待。
-- 使用 `@laiye-adp/mcp@beta` 跟随 Beta，或指定 `@laiye-adp/mcp@2.0.0-beta.2` 固定版本。更新或回退后重新连接 MCP。
-- 可沿用已有的 API Key。下方源码运行和上方调用示例均使用当前版本。
-- 从源码运行时，在仓库根目录执行 `npm ci` 和 `npm run build`，再用 `node` 启动 `dist/index.js` 的绝对路径。运行 `npm test` 验证工具行为。更新工具定义后执行 `npm run catalog:generate`，再用 `npm run catalog:check` 校验工具表。
+在包目录执行 `npm ci`、`npm run build`，再将客户端配置中的 `command` 设为 `node`，`args` 设为本地 `dist/index.js` 的绝对路径。运行 `npm test` 验证工具行为，使用 `npm run catalog:generate` 和 `npm run catalog:check` 更新并核对工具表。上方 `npx` 示例运行 npm 上已发布的 Beta 版本。
 
 ## English quick start
 
-Use Node.js 20+ and the stdio configuration above. Set `ADP_ACCEPT_LANGUAGE` to `en` for English guidance. Use an existing Key, or remove `ADP_API_KEY` to inherit the CLI profile on the same machine and OS account.
+Use Node.js 20+ and the stdio configuration above. Set `ADP_ACCEPT_LANGUAGE=en` for English tool titles, descriptions, parameter help, the guide, and API responses. Provide an API key, or use the credentials saved by ADP CLI on the same machine and OS account. Use `ADP_REGION` or `ADP_API_BASE_URL` to select a deployment explicitly.
 
-For a public-cloud Key without a matching CLI profile, MCP checks China first with a read-only request and checks Global only after an exact `404 Accessor not found`. A confirmed region is reused for the current process. Set `ADP_REGION` or `ADP_API_BASE_URL` to choose a target directly. Call `get_adp_guide` with `{}` for your region's presets and document processing examples.
+Use `get_adp_guide` to choose an approach, `list_apps` to find accessible apps and `get_app` for configuration details. Upload local files with `upload_file` or provide a downloadable URL. Each call to `parse_document`, `extract_document` or `classify_document` processes one document. In either extraction mode, supply `file_url` or `file_base64`. Add `fields` for a one-off extraction or `app_id` to run an extraction app. Parsing, app-based extraction, and classification return the final result in the same call by default. The synchronous HTTP timeout defaults to 60 seconds and can be set using `wait_timeout_seconds`. If it expires, the processing outcome is unknown. Use `wait=false` to create a background task and pass its top-level `task_ref` to `get_task`. Use `cancel_task` for an unclaimed queued document task.
 
-Use `upload_temporary_file` for local files. Copy each returned `files[i].data.download_url` into the next tool's `files[i].url`. Read each file's own result or pass its `task_ref` to `task`. Document tools accept 1–20 files per call and allow up to 3 in-flight requests, including applicable polling. The default automatic wait after submission is 60 seconds.
-
-`task` defaults to `action: "query"`. Provide exactly one identifier form: `task_ref`, a workflow `run_id`, or a document `task_id` plus `task_type` (`parse`, `extract`, or `classify`). Set `action: "cancel"` to cancel an unclaimed pending document task. Workflows support queries only. Successful cancellation returns `status: "succeeded"`; `data.status` is the actual task state. Refused cancellation returns `TASK_NOT_CANCELLABLE` and retains the original state in `data`. Querying a cancelled task returns `status: "cancelled"` without a tool error. Neither action submits a new task.
-
-The `beta` tag tracks the preview. Pin `@laiye-adp/mcp@2.0.0-beta.2` for this release. From source, run `npm ci`, `npm run build` and `npm test`. [Connectivity and authentication](https://adp-doc.laiye.com/en/api-reference/troubleshooting) · [Rate limits, concurrency and timeouts](https://adp-doc.laiye.com/en/api-reference/rate-limits)
+To test the local source, build it and point your MCP client's stdio command at the resulting `dist/index.js`. [Connectivity and authentication](https://adp-doc.laiye.com/en/api-reference/troubleshooting) · [Rate limits, concurrency and timeouts](https://adp-doc.laiye.com/en/api-reference/rate-limits)

@@ -1,0 +1,3601 @@
+[
+  {
+    "name": "get_adp_guide",
+    "title": "获取文档处理业务指南",
+    "description": "当前对话首次使用 ADP 时，建议查阅这份业务指南。后续任务可直接复用已读内容。结合发票、订单、证照和合同等场景，判断何时解析全文、抽取字段或按页分类，以及何时复用或创建应用。也可查阅支持的文件格式、同步与异步的选择、并发与限流、积分查询与充值，以及向 ADP 提交反馈的方式。",
+    "inputSchema": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {},
+      "description": "无需填写参数。"
+    },
+    "outputSchema": {
+      "type": "object",
+      "properties": {
+        "status": {
+          "const": "succeeded"
+        },
+        "version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "markdown": {
+          "type": "string",
+          "minLength": 1,
+          "description": "《ADP 文档处理业务指南》正文。"
+        }
+      },
+      "required": [
+        "status",
+        "version",
+        "markdown"
+      ]
+    },
+    "annotations": {
+      "readOnlyHint": true
+    }
+  },
+  {
+    "name": "upload_file",
+    "title": "上传文件",
+    "description": "将文件上传到 ADP，返回可用于解析、抽取或分类的下载地址。已有可下载的 HTTP(S) 文件地址时，可跳过上传。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "files": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 20,
+          "items": {
+            "type": "object",
+            "properties": {
+              "file_path": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "\\S",
+                "description": "当前上传工具可读取的本地文件绝对路径或 file:/// 地址。",
+                "title": "本机文件路径"
+              }
+            },
+            "required": [
+              "file_path"
+            ],
+            "additionalProperties": false,
+            "title": "文件上传项",
+            "description": "一项对应一个要上传的文件。"
+          },
+          "description": "填写 1 至 20 个本机文件，上传后按项返回各自的下载地址。",
+          "title": "上传文件列表"
+        }
+      },
+      "required": [
+        "files"
+      ],
+      "additionalProperties": false,
+      "description": "每个文件填一项本机路径。"
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false
+    },
+    "outputSchema": {
+      "type": "object",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "status": {
+              "enum": [
+                "succeeded",
+                "failed",
+                "partial_success"
+              ]
+            },
+            "files": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "type": "object",
+                "properties": {
+                  "index": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "status": {
+                    "enum": [
+                      "succeeded",
+                      "failed"
+                    ]
+                  },
+                  "data": {
+                    "type": "object",
+                    "properties": {
+                      "download_url": {
+                        "type": "string",
+                        "format": "uri",
+                        "pattern": "^https?://[^\\s]+$"
+                      },
+                      "file_name": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "download_url"
+                    ]
+                  },
+                  "error": {
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "index",
+                  "status"
+                ],
+                "if": {
+                  "properties": {
+                    "status": {
+                      "const": "succeeded"
+                    }
+                  }
+                },
+                "then": {
+                  "required": [
+                    "data"
+                  ]
+                },
+                "else": {
+                  "required": [
+                    "error"
+                  ]
+                }
+              }
+            }
+          },
+          "required": [
+            "status",
+            "files"
+          ],
+          "not": {
+            "required": [
+              "error"
+            ]
+          }
+        },
+        {
+          "type": "object",
+          "properties": {
+            "status": {
+              "const": "failed"
+            },
+            "error": {
+              "type": "object"
+            }
+          },
+          "required": [
+            "status",
+            "error"
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "name": "parse_document",
+    "title": "文档解析",
+    "description": "将一份文档的全文或指定原始页解析为正文、表格和版面结构，供阅读、翻译或构建知识库。默认使用增强解析 2.0（fast_vlm），可切换解析模式、去除页眉页脚和页码，或识别并提取印章。开启去除页眉页脚且未指定模式时，使用智能解析 2.0（agentic_v2）。用户说“OCR”且只要金额、证件号等字段值时，用 extract_document。默认同步解析并返回结果。需要后台处理时传 wait=false，随后用返回的 task_ref 调用 get_task。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "file_url": {
+          "type": "string",
+          "format": "uri",
+          "pattern": "^https?://[^\\s]+$",
+          "description": "填写一份文档可下载的 HTTP(S) 地址，也可使用上传返回的 download_url。使用 file_base64 时省略此项。",
+          "title": "文件下载地址"
+        },
+        "file_base64": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\S",
+          "contentEncoding": "base64",
+          "description": "使用 Base64 提供一份文档时填写此项；已填写 file_url 时省略。",
+          "title": "文件内容（Base64）"
+        },
+        "file_name": {
+          "type": "string",
+          "description": "可选文件名。使用 Base64 或无法从地址判断文件名时，建议提供含扩展名的名称。",
+          "title": "文件名"
+        },
+        "recognize_mode": {
+          "type": "string",
+          "enum": [
+            "agentic",
+            "fast_vlm",
+            "agentic_v2",
+            "thai_ocr"
+          ],
+          "description": "用户指定模式时使用对应值。agentic（智能解析）适合内容类型多样、版式复杂的文档。fast_vlm（增强解析 2.0）适合扫描件、复杂版式和多表格文档，侧重解析稳定性。agentic_v2（智能解析 2.0）适合复杂表格或公式。thai_ocr（泰语优先）适合以泰语为主的文档。省略时使用 fast_vlm；开启去除页眉页脚且未指定模式时，使用 agentic_v2。",
+          "title": "解析模式"
+        },
+        "enable_highlight": {
+          "type": "integer",
+          "enum": [
+            0,
+            1
+          ],
+          "title": "显示来源位置",
+          "description": "需要核对原文时传 1，保留文本块和表格在原页面上的位置，可能略微增加耗时。传 0 关闭。支持 agentic、fast_vlm 和 agentic_v2。省略此项时沿用解析服务的配置。"
+        },
+        "pages": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "minimum": 1,
+            "title": "原始页码",
+            "description": "填写原文档中的页码，从 1 开始。"
+          },
+          "uniqueItems": true,
+          "default": [],
+          "description": "要解析的原始页码，从 1 开始。省略或传 [] 时处理全部页面。",
+          "title": "原始页码"
+        },
+        "remove_header_footer": {
+          "type": "boolean",
+          "description": "传 true 去除识别出的页眉、页脚和页码。支持 agentic 和 agentic_v2。传 true 且省略 recognize_mode 时使用 agentic_v2。",
+          "title": "去除页眉、页脚和页码"
+        },
+        "enable_stamp_recognition": {
+          "type": "boolean",
+          "description": "需要单独提取印章时传 true。在支持的文档类型且已开通印章识别能力时，返回识别到的印章文字和位置，生成裁图时附图像地址。",
+          "title": "识别并提取印章"
+        },
+        "wait": {
+          "type": "boolean",
+          "default": true,
+          "description": "true（默认）调用同步接口并直接返回结果；false 创建异步任务，返回可供 get_task 查询的 task_ref。",
+          "title": "等待本次处理结果"
+        },
+        "wait_timeout_seconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 900,
+          "default": 60,
+          "description": "wait=true 的同步请求时限，默认 60 秒。超时返回错误，处理结果可能未知。wait=false 时忽略。",
+          "title": "结果等待时间（秒）"
+        }
+      },
+      "additionalProperties": false,
+      "description": "每次解析一份文档。在 file_url 与 file_base64 中选填一项。"
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false
+    },
+    "outputSchema": {
+      "type": "object",
+      "properties": {
+        "status": {
+          "enum": [
+            "succeeded",
+            "pending",
+            "failed",
+            "cancelled"
+          ]
+        },
+        "data": {
+          "type": "object",
+          "properties": {
+            "doc_recognize_result": {
+              "type": "array"
+            }
+          }
+        },
+        "task_ref": {
+          "$ref": "#/$defs/task_ref"
+        },
+        "error": {
+          "type": "object",
+          "properties": {
+            "message": {
+              "type": "string",
+              "minLength": 1
+            },
+            "code": {
+              "type": "string"
+            },
+            "acceptance_unknown": {
+              "type": "boolean"
+            },
+            "retryable": {
+              "type": "boolean"
+            },
+            "retry_after_ms": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "message"
+          ]
+        },
+        "next_steps": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "message": {
+                "type": "string",
+                "minLength": 1
+              },
+              "tool": {
+                "const": "get_task"
+              },
+              "arguments": {
+                "type": "object",
+                "properties": {
+                  "task_ref": {
+                    "$ref": "#/$defs/task_ref"
+                  }
+                },
+                "required": [
+                  "task_ref"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "message"
+            ],
+            "dependentRequired": {
+              "tool": [
+                "arguments"
+              ],
+              "arguments": [
+                "tool"
+              ]
+            },
+            "additionalProperties": false
+          }
+        },
+        "usage_status": {
+          "enum": [
+            "available",
+            "unavailable"
+          ]
+        },
+        "recorded_credits": {
+          "type": "number",
+          "minimum": 0
+        },
+        "usage": {
+          "type": "object",
+          "properties": {
+            "credits_consumed": {
+              "type": "number",
+              "minimum": 0
+            },
+            "num_pages": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "billing_breakdown": {
+              "type": "object"
+            }
+          }
+        }
+      },
+      "required": [
+        "status"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "pending"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "required": [
+              "task_ref",
+              "next_steps"
+            ],
+            "properties": {
+              "next_steps": {
+                "contains": {
+                  "type": "object",
+                  "required": [
+                    "tool"
+                  ],
+                  "properties": {
+                    "tool": {
+                      "const": "get_task"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "succeeded"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "required": [
+              "data"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "failed"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "required": [
+              "error"
+            ]
+          }
+        }
+      ],
+      "$defs": {
+        "task_ref": {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "parse"
+            },
+            "id": {
+              "type": "string",
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9_-]+$"
+            }
+          },
+          "required": [
+            "kind",
+            "id"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "description": "同步调用返回本次文档处理的结果；异步受理后可用顶层 task_ref 调用 get_task。同步超时或提交结果未知时保留错误信息，避免自动重提。",
+      "not": {
+        "anyOf": [
+          {
+            "required": [
+              "files"
+            ]
+          },
+          {
+            "required": [
+              "index"
+            ]
+          }
+        ]
+      }
+    }
+  },
+  {
+    "name": "extract_document",
+    "title": "文档抽取",
+    "description": "从一份文档提取字段值，例如身份证上的姓名、合同中的付款期限。根据用户是否指定抽取应用、字段或文档类型选择用法。\n\n**指定了抽取应用。** 已知 `app_id` 时，直接传入该 ID 和文件。用户点名团队应用时，调用 `list_apps`，传 `engine_type=extract`、`source=custom` 和 `app_name`。只给应用名且来源不明时，按名称和业务类型搜索两种来源。同名结果无法区分时请用户选择。用户同时点名字段时，按应用规则抽取，只展示指定字段。\n\n**一次性抽取。** 用户明确本次要哪些字段、且未指定应用时，直接传文件和 `fields`（1–20 个），同步返回字段值，无需查询应用目录。例如“这次只要合同的付款期限和违约金”。\n\n**只给文档类型。** 例如“帮我抽取这张身份证”，用 `list_apps` 传 `engine_type=extract`、`source=preset` 和 `document_type`，再用返回的 `app_id` 抽取。若没有匹配预置，可按文档内容和用途选定本次字段。仍不明确时询问用户。\n\n抽取完成后按实际返回的字段作答，缺失的字段如实说明。用户还要求整页原文、Markdown 或版面时，再调用 `parse_document`。\n\n**专业抽取（自定义抽取应用）。** 用户对准确率、处理速度、跨版式一致性有明确要求，或需长期复用规则时，可推荐自定义抽取应用。用户决定创建后，用 `create_extraction_app` 保存字段类型、取值规则和输出格式，再用返回的 `app_id` 在代表性样本上验证效果和耗时。\n\n按 `app_id` 抽取默认同步。需要后台处理时，传 `app_id` 和 `wait=false`，再用返回的 `task_ref` 调用 `get_task`。一次性 `fields` 仅支持同步。如果用户既限定一次性字段、又要求后台任务，请说明可选同步字段抽取或允许使用抽取应用后异步处理，请用户选择。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "app_id": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\S",
+          "description": "使用已有预置或自定义抽取应用时填写其 ID。应用规则决定要抽取的字段。按本次指定字段抽取时省略此项，并填写 fields。",
+          "title": "抽取应用 ID"
+        },
+        "file_url": {
+          "type": "string",
+          "format": "uri",
+          "pattern": "^(?:https?://[^\\s]+|[Jj][Oo][Bb][Ii][Dd]://[0-9a-fA-F]{32})$",
+          "description": "提供一份文档的 HTTP(S) 下载地址。仅标准版自定义抽取应用可改传 jobid://<32 位十六进制解析任务 ID>，复用同区域、同租户、同一 API 账号下已成功且仍可读取的完整逐页解析结果（异步任务，Markdown 和 Excel 除外）。复用时沿用原任务的页范围，文件来源只填 file_url。",
+          "title": "文件下载地址"
+        },
+        "file_base64": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\S",
+          "contentEncoding": "base64",
+          "description": "用 Base64 提供一份文件。按 fields 抽取时，file_url 和 file_base64 必须二选一。按 app_id 抽取也建议只传一种来源；若同时传入有效 HTTP(S) 地址和 Base64，使用 Base64。",
+          "title": "文件内容（Base64）"
+        },
+        "file_name": {
+          "type": "string",
+          "description": "按 app_id 抽取时可填写原文件名并保留扩展名。使用 Base64 或下载地址未显示文件类型时建议填写，尤其是 Excel 和 Markdown。按 fields 抽取时省略。",
+          "title": "文件名"
+        },
+        "fields": {
+          "type": "array",
+          "maxItems": 20,
+          "uniqueItems": true,
+          "description": "只为本次抽取指定字段时填写，和 app_id 二选一。按期望顺序填写 1 至 20 个字段，每项提供 name，可选填 prompt。字段名去除首尾空白后不区分大小写且须唯一。直接返回字段值。此模式不接受选页、多票拆分、验真、翻译、原文定位、置信度或附带解析结果开关。",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "\\S",
+                "description": "需要提取的字段名，例如合同金额。",
+                "title": "要提取的字段名称"
+              },
+              "prompt": {
+                "type": "string",
+                "description": "本次字段的可选要求，例如优先使用含税总金额。",
+                "title": "本次取值要求"
+              }
+            },
+            "required": [
+              "name"
+            ],
+            "additionalProperties": false,
+            "title": "本次抽取字段",
+            "description": "填写一个要返回的字段名称，按需补充该字段的取值要求。"
+          },
+          "title": "本次提取的字段"
+        },
+        "pages": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "minimum": 1,
+            "title": "原始页码",
+            "description": "填写原文档中的页码，从 1 开始。"
+          },
+          "uniqueItems": true,
+          "description": "按 app_id 抽取时，从 1 开始指定不重复的原始页码，省略或传 [] 处理全部可处理页面。原生 Markdown 只有第 1 页，卡证每次最多处理 5 页，国内通用票据按整份文件处理。复用 jobid 时建议省略页码，如填写则须与原解析页范围完全一致。按 fields 抽取时省略。",
+          "title": "原始页码"
+        },
+        "with_rec_result": {
+          "type": "boolean",
+          "description": "按 app_id 抽取时，经典自定义抽取、采购订单和海外发票及收据标准版可附带逐页解析内容，默认关闭。高速自定义、海外票据高速版及东南亚版、国内通用票据、卡证和送货单直接返回抽取结果。需要全文或 Markdown 时使用 parse_document。",
+          "title": "附带解析结果（经典自定义、采购订单、海外票据标准版）"
+        },
+        "enable_multi_ticket": {
+          "type": "boolean",
+          "description": "仅海外发票和收据的高速版（国际通用）和东南亚版支持。默认开启，将同一文件中的多张票据拆成独立结果；传 false 可关闭本次拆分。",
+          "title": "拆分多张票据（海外发票和收据高速版、东南亚版）"
+        },
+        "enable_invoice_verify": {
+          "type": "boolean",
+          "description": "仅中国区的国内通用票据预置应用接受此参数。传 true 随本次抽取查验支持的发票，false 关闭，省略时沿用应用设置。其他应用请省略此参数，传 false 也会报错。",
+          "title": "随单验真（中国区国内通用票据预置）"
+        },
+        "enable_field_value_translation": {
+          "type": "boolean",
+          "description": "适用于经典及高速自定义抽取、海外发票和收据、采购订单及送货单。传 true 将可翻译的字段值译为连接的 Accept-Language 指定的语言，金额等数值可保留原值。仅覆盖本次调用，省略时沿用应用设置。",
+          "title": "翻译字段值（自定义抽取、海外票据、采购订单、送货单）"
+        },
+        "enable_highlight": {
+          "type": "boolean",
+          "description": "支持高速自定义抽取、海外发票和收据的高速版（国际通用）与东南亚版，以及送货单应用。传 true 返回字段值在原文中的位置。仅覆盖本次调用，省略时沿用应用配置。高速自定义已开启跨页增强时，此项须关闭。",
+          "title": "返回原文位置（高速自定义、海外高速版及东南亚版、送货单）"
+        },
+        "enable_confidence": {
+          "type": "boolean",
+          "description": "支持高速自定义抽取、海外发票和收据的高速版（国际通用）与东南亚版，以及送货单应用。传 true 计算并返回字段置信度。仅覆盖本次调用，省略时沿用应用配置。高速自定义已开启跨页增强时，此项须关闭。",
+          "title": "返回字段置信度（高速自定义、海外高速版及东南亚版、送货单）"
+        },
+        "wait": {
+          "type": "boolean",
+          "description": "按 app_id 抽取时，true（默认）调用同步接口并直接返回结果；false 创建异步任务，返回可供 get_task 查询的 task_ref。",
+          "title": "等待本次抽取结果（按应用运行）"
+        },
+        "wait_timeout_seconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 900,
+          "description": "按 app_id 抽取时，wait=true 的同步请求时限，默认 60 秒。超时返回错误，处理结果可能未知。wait=false 时忽略。",
+          "title": "结果等待时间（秒）"
+        }
+      },
+      "additionalProperties": false,
+      "description": "每次抽取一份文档。选择一种文件来源，再选择一种抽取方式：app_id 使用已有规则，fields 指定本次字段。"
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": true
+    },
+    "outputSchema": {
+      "type": "object",
+      "properties": {
+        "status": {
+          "enum": [
+            "succeeded",
+            "pending",
+            "failed",
+            "cancelled"
+          ]
+        },
+        "data": {
+          "type": "object",
+          "properties": {
+            "extraction_result": {
+              "type": "array"
+            }
+          }
+        },
+        "task_ref": {
+          "$ref": "#/$defs/task_ref"
+        },
+        "error": {
+          "type": "object",
+          "properties": {
+            "message": {
+              "type": "string",
+              "minLength": 1
+            },
+            "code": {
+              "type": "string"
+            },
+            "acceptance_unknown": {
+              "type": "boolean"
+            },
+            "retryable": {
+              "type": "boolean"
+            },
+            "retry_after_ms": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "message"
+          ]
+        },
+        "next_steps": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "message": {
+                "type": "string",
+                "minLength": 1
+              },
+              "tool": {
+                "const": "get_task"
+              },
+              "arguments": {
+                "type": "object",
+                "properties": {
+                  "task_ref": {
+                    "$ref": "#/$defs/task_ref"
+                  }
+                },
+                "required": [
+                  "task_ref"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "message"
+            ],
+            "dependentRequired": {
+              "tool": [
+                "arguments"
+              ],
+              "arguments": [
+                "tool"
+              ]
+            },
+            "additionalProperties": false
+          }
+        },
+        "usage_status": {
+          "enum": [
+            "available",
+            "unavailable"
+          ]
+        },
+        "recorded_credits": {
+          "type": "number",
+          "minimum": 0
+        },
+        "usage": {
+          "type": "object",
+          "properties": {
+            "credits_consumed": {
+              "type": "number",
+              "minimum": 0
+            },
+            "num_pages": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "billing_breakdown": {
+              "type": "object"
+            }
+          }
+        }
+      },
+      "required": [
+        "status"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "pending"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "required": [
+              "task_ref",
+              "next_steps"
+            ],
+            "properties": {
+              "next_steps": {
+                "contains": {
+                  "type": "object",
+                  "required": [
+                    "tool"
+                  ],
+                  "properties": {
+                    "tool": {
+                      "const": "get_task"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "succeeded"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "required": [
+              "data"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "failed"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "required": [
+              "error"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "succeeded"
+              }
+            },
+            "required": [
+              "status"
+            ],
+            "not": {
+              "required": [
+                "task_ref"
+              ]
+            }
+          },
+          "then": {
+            "properties": {
+              "data": {
+                "required": [
+                  "extraction_result"
+                ]
+              }
+            }
+          }
+        }
+      ],
+      "$defs": {
+        "task_ref": {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "extract"
+            },
+            "id": {
+              "type": "string",
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9_-]+$"
+            }
+          },
+          "required": [
+            "kind",
+            "id"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "description": "同步调用返回本次文档处理的结果；异步受理后可用顶层 task_ref 调用 get_task。同步超时或提交结果未知时保留错误信息，避免自动重提。",
+      "not": {
+        "anyOf": [
+          {
+            "required": [
+              "files"
+            ]
+          },
+          {
+            "required": [
+              "index"
+            ]
+          }
+        ]
+      }
+    }
+  },
+  {
+    "name": "classify_document",
+    "title": "文档分类",
+    "description": "需要判断文件的文档类型（如发票、合同），或找出混合文件中每份材料所在的页面时，调用此工具。\n\n1. **选择分类应用**。使用当前账号创建、且包含所需类别的分类应用 `app_id`。如果当前连接的 `list_apps` 支持分类筛选，可按 `engine_type=classify` 查找。没有合适的应用时，用 `create_extraction_app` 传入 `ai_function=1426`、应用名称和 `classify_types` 创建分类应用，再使用返回的 `app_id`。\n2. **提交文件**。传入 `app_id` 和一份文件，例如用 `file_url` 提供下载地址。省略 `pages` 时分类整份文件，传 `pages=[2, 4]` 时只分类原文件第 2、4 页。多份文件逐份调用，按文件汇总。默认同步返回，需要稍后取结果时传 `wait=false`，再用返回的 `task_ref` 调用 `get_task`。\n3. **解读结果**。`data.segments` 按材料列出文档类型和原始页码，`data.unclassified_pages` 列出本次未能归类的页码。用户要定位混合材料时，按材料报告即可。用户要整份文件的单一文档类型时，应分类全部页面。若所有页面均归入同一类别，报告该类别。若命中多个类别或有未分类页，列明相应页码，并将整份文件的文档类型标为待确认。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "file_url": {
+          "type": "string",
+          "format": "uri",
+          "pattern": "^https?://[^\\s]+$",
+          "description": "一份 PDF、JPEG 或 PNG 的 HTTP(S) 下载地址，可使用上传返回的 download_url。与 file_base64 二选一。",
+          "title": "文件下载地址"
+        },
+        "file_base64": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\S",
+          "contentEncoding": "base64",
+          "description": "一份 PDF、JPEG 或 PNG 的 Base64 内容。与 file_url 二选一。",
+          "title": "文件内容（Base64）"
+        },
+        "file_name": {
+          "type": "string",
+          "description": "可选文件名。使用 Base64 或无法从地址判断文件名时，建议提供含扩展名的名称。",
+          "title": "文件名"
+        },
+        "app_id": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\S",
+          "description": "当前账号创建的分类应用 ID，决定本次识别哪些文档类型。使用创建分类应用时保存的 ID；若当前连接的 list_apps 提供 classify 筛选，也可按 engine_type=classify 查找。",
+          "title": "分类应用 ID"
+        },
+        "pages": {
+          "type": "array",
+          "maxItems": 260,
+          "uniqueItems": true,
+          "items": {
+            "type": "integer",
+            "minimum": 1,
+            "title": "原始页码",
+            "description": "填写原文档中的页码，从 1 开始。"
+          },
+          "description": "只分类指定的原始页码，从 1 开始且不能重复。省略或传 [] 时处理全部页面。例如传 [3, 5]，结果仍使用第 3、5 页的原始页码。",
+          "title": "原始页码"
+        },
+        "wait": {
+          "type": "boolean",
+          "default": true,
+          "description": "本轮需要分类结果时用 true（默认）。多份文件要分别提交、稍后统一查询时用 false，每份文件会返回自己的 task_ref，供 get_task 查询。",
+          "title": "等待本次处理结果"
+        },
+        "wait_timeout_seconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 900,
+          "default": 60,
+          "description": "wait=true 的同步请求时限，默认 60 秒。超时返回错误，处理结果可能未知。wait=false 时忽略。",
+          "title": "结果等待时间（秒）"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "app_id"
+      ],
+      "description": "传当前账号创建的分类应用 app_id，每次提供一份 PDF、JPEG 或 PNG，file_url 与 file_base64 二选一。单文件最大 100 MiB，PDF 原文件最多 260 页。"
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": true
+    },
+    "outputSchema": {
+      "type": "object",
+      "properties": {
+        "status": {
+          "enum": [
+            "succeeded",
+            "pending",
+            "failed",
+            "cancelled"
+          ]
+        },
+        "data": {
+          "type": "object",
+          "properties": {
+            "segments": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "category_key": {
+                    "type": "string",
+                    "description": "该材料匹配的分类标识，来自分类应用的配置。"
+                  },
+                  "category_name": {
+                    "type": "string",
+                    "description": "该材料匹配的文档类型名称，例如合同或发票。"
+                  },
+                  "pages": {
+                    "type": "array",
+                    "items": {
+                      "type": "integer",
+                      "minimum": 1
+                    },
+                    "uniqueItems": true,
+                    "description": "该材料在输入文件中的原始页码，从 1 开始。"
+                  }
+                },
+                "required": [
+                  "category_key",
+                  "category_name",
+                  "pages"
+                ]
+              },
+              "description": "每项对应原文件中的一份材料。同一文档类型可能有多份，同一页也可能匹配多个文档类型。"
+            },
+            "unclassified_pages": {
+              "type": "array",
+              "items": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "uniqueItems": true,
+              "description": "本次参与分类、但未匹配任何文档类型的原始页码。"
+            }
+          }
+        },
+        "task_ref": {
+          "$ref": "#/$defs/task_ref"
+        },
+        "error": {
+          "type": "object",
+          "properties": {
+            "message": {
+              "type": "string",
+              "minLength": 1
+            },
+            "code": {
+              "type": "string"
+            },
+            "acceptance_unknown": {
+              "type": "boolean"
+            },
+            "retryable": {
+              "type": "boolean"
+            },
+            "retry_after_ms": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "message"
+          ]
+        },
+        "next_steps": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "message": {
+                "type": "string",
+                "minLength": 1
+              },
+              "tool": {
+                "const": "get_task"
+              },
+              "arguments": {
+                "type": "object",
+                "properties": {
+                  "task_ref": {
+                    "$ref": "#/$defs/task_ref"
+                  }
+                },
+                "required": [
+                  "task_ref"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "message"
+            ],
+            "dependentRequired": {
+              "tool": [
+                "arguments"
+              ],
+              "arguments": [
+                "tool"
+              ]
+            },
+            "additionalProperties": false
+          }
+        },
+        "usage_status": {
+          "enum": [
+            "available",
+            "unavailable"
+          ]
+        },
+        "recorded_credits": {
+          "type": "number",
+          "minimum": 0
+        },
+        "usage": {
+          "type": "object",
+          "properties": {
+            "credits_consumed": {
+              "type": "number",
+              "minimum": 0
+            },
+            "num_pages": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "billing_breakdown": {
+              "type": "object"
+            }
+          }
+        }
+      },
+      "required": [
+        "status"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "pending"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "required": [
+              "task_ref",
+              "next_steps"
+            ],
+            "properties": {
+              "next_steps": {
+                "contains": {
+                  "type": "object",
+                  "required": [
+                    "tool"
+                  ],
+                  "properties": {
+                    "tool": {
+                      "const": "get_task"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "succeeded"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "required": [
+              "data"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "failed"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "required": [
+              "error"
+            ]
+          }
+        }
+      ],
+      "$defs": {
+        "task_ref": {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "classify"
+            },
+            "id": {
+              "type": "string",
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9_-]+$"
+            }
+          },
+          "required": [
+            "kind",
+            "id"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "description": "同步调用返回本次文档处理的结果；异步受理后可用顶层 task_ref 调用 get_task。同步超时或提交结果未知时保留错误信息，避免自动重提。",
+      "not": {
+        "anyOf": [
+          {
+            "required": [
+              "files"
+            ]
+          },
+          {
+            "required": [
+              "index"
+            ]
+          }
+        ]
+      }
+    }
+  },
+  {
+    "name": "create_extraction_app",
+    "title": "创建抽取或分类应用",
+    "description": "需要保存可复用的抽取或分类规则，或准备分类文件却没有合适的分类应用时，调用此工具。用 `app_name` 指定名称，可用 `description` 说明用途。\n\n1. **抽取应用**。反复从同类文档提取相同字段时，使用 `ai_function=1425`（默认）。用 `extract_fields` 定义字段名称、类型和抽取提示词，例如发票号码、开票日期和价税合计。创建后，将返回的 `app_id` 和文件传给 `extract_document`。只临时提取几个字段时，可直接用 `extract_document` 的 `fields`。\n2. **分类应用**。需要识别一份文件包含哪些材料、每份材料在原文件的哪几页时，使用 `ai_function=1426`。用 `classify_types` 定义要识别的类别，例如发票、合同和付款凭证。创建后，将返回的 `app_id` 和文件传给 `classify_document`。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "ai_function": {
+          "type": "integer",
+          "enum": [
+            1425,
+            1426
+          ],
+          "default": 1425,
+          "title": "应用类型",
+          "description": "1425 创建抽取应用，保存 extract_fields 指定的字段。1426 创建分类应用，保存 classify_types 指定的类别。省略时使用 1425。"
+        },
+        "app_name": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\S",
+          "maxLength": 50,
+          "description": "应用名称，最多 50 个字符。",
+          "title": "应用名称"
+        },
+        "description": {
+          "type": "string",
+          "maxLength": 1500,
+          "description": "说明此抽取或分类应用的用途。",
+          "title": "应用说明"
+        },
+        "extract_fields": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 110,
+          "items": {
+            "type": "object",
+            "properties": {
+              "field_key": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9_]{0,63}$",
+                "description": "字段或表格列的稳定标识，在整个配置内不区分大小写且唯一。",
+                "title": "字段标识"
+              },
+              "field_name": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "\\S",
+                "maxLength": 50,
+                "title": "字段名称",
+                "description": "要输出的业务字段名称，最多 50 个字符，例如“合同金额”。"
+              },
+              "field_type": {
+                "enum": [
+                  "string",
+                  "number",
+                  "date",
+                  "table"
+                ],
+                "type": "string",
+                "title": "字段类型",
+                "description": "string 表示文本，number 表示数值，date 表示日期，table 表示包含多列的明细表。选择 table 时填写 sub_fields，其余类型省略 sub_fields。"
+              },
+              "field_prompt": {
+                "type": "string",
+                "maxLength": 3000,
+                "title": "取值规则",
+                "description": "普通字段或表格列的取值规则，最多 3000 个字符，例如“提取含税总金额”。表格本身的取值要求请填写在对应列中。"
+              },
+              "format": {
+                "type": "object",
+                "properties": {
+                  "mode": {
+                    "type": "string",
+                    "title": "格式设置方式",
+                    "description": "设置输出格式时必选。preset 使用预置格式，custom 按 instruction 中的文字要求输出。",
+                    "enum": [
+                      "preset",
+                      "custom"
+                    ]
+                  },
+                  "preset": {
+                    "type": "string",
+                    "title": "预置格式",
+                    "description": "mode 为 preset 时必选。数值可选 integer（整数）、decimal（小数）、grouped_integer（千分位整数）、grouped_decimal（千分位小数）；日期可选 date_iso（年-月-日）、date_slash（年/月/日）、date_cn（中文年月日）、datetime（日期和时间）。",
+                    "enum": [
+                      "integer",
+                      "decimal",
+                      "grouped_integer",
+                      "grouped_decimal",
+                      "date_iso",
+                      "date_slash",
+                      "date_cn",
+                      "datetime"
+                    ]
+                  },
+                  "instruction": {
+                    "type": "string",
+                    "title": "自定义格式要求",
+                    "description": "mode 为 custom 时必填。例如，填写“金额保留两位小数并附上币种”。",
+                    "minLength": 1,
+                    "pattern": "\\S"
+                  },
+                  "decimal_places": {
+                    "type": "integer",
+                    "title": "小数位数",
+                    "description": "仅在 preset 为 decimal 或 grouped_decimal 时填写。0 表示保留到整数位，2 表示保留两位小数。",
+                    "minimum": 0
+                  },
+                  "rounding": {
+                    "type": "string",
+                    "title": "舍入方式",
+                    "description": "仅用于数值预置格式。half_up 表示四舍五入；truncate 表示截去多余位数。",
+                    "enum": [
+                      "half_up",
+                      "truncate"
+                    ]
+                  }
+                },
+                "additionalProperties": false,
+                "description": "高速抽取应用的 number 或 date 字段及表格列可设置输出格式。可选预置格式，或用文字指定格式要求。",
+                "title": "数值或日期的输出格式"
+              },
+              "sub_fields": {
+                "type": "array",
+                "maxItems": 30,
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "field_key": {
+                      "type": "string",
+                      "pattern": "^[A-Za-z0-9][A-Za-z0-9_]{0,63}$",
+                      "description": "字段或表格列的稳定标识，在整个配置内不区分大小写且唯一。",
+                      "title": "列标识"
+                    },
+                    "field_name": {
+                      "type": "string",
+                      "minLength": 1,
+                      "pattern": "\\S",
+                      "maxLength": 50,
+                      "title": "列名称",
+                      "description": "该表格列的业务名称，最多 50 个字符，例如“商品单价”。"
+                    },
+                    "field_type": {
+                      "enum": [
+                        "string",
+                        "number",
+                        "date"
+                      ],
+                      "type": "string",
+                      "title": "列类型",
+                      "description": "string 表示文本，number 表示数值，date 表示日期。省略时使用 string。"
+                    },
+                    "field_prompt": {
+                      "type": "string",
+                      "maxLength": 3000,
+                      "title": "列取值规则",
+                      "description": "普通字段或表格列的取值规则，最多 3000 个字符，例如“提取含税总金额”。表格本身的取值要求请填写在对应列中。"
+                    },
+                    "format": {
+                      "type": "object",
+                      "properties": {
+                        "mode": {
+                          "type": "string",
+                          "title": "格式设置方式",
+                          "description": "设置输出格式时必选。preset 使用预置格式，custom 按 instruction 中的文字要求输出。",
+                          "enum": [
+                            "preset",
+                            "custom"
+                          ]
+                        },
+                        "preset": {
+                          "type": "string",
+                          "title": "预置格式",
+                          "description": "mode 为 preset 时必选。数值可选 integer（整数）、decimal（小数）、grouped_integer（千分位整数）、grouped_decimal（千分位小数）；日期可选 date_iso（年-月-日）、date_slash（年/月/日）、date_cn（中文年月日）、datetime（日期和时间）。",
+                          "enum": [
+                            "integer",
+                            "decimal",
+                            "grouped_integer",
+                            "grouped_decimal",
+                            "date_iso",
+                            "date_slash",
+                            "date_cn",
+                            "datetime"
+                          ]
+                        },
+                        "instruction": {
+                          "type": "string",
+                          "title": "自定义格式要求",
+                          "description": "mode 为 custom 时必填。例如，填写“金额保留两位小数并附上币种”。",
+                          "minLength": 1,
+                          "pattern": "\\S"
+                        },
+                        "decimal_places": {
+                          "type": "integer",
+                          "title": "小数位数",
+                          "description": "仅在 preset 为 decimal 或 grouped_decimal 时填写。0 表示保留到整数位，2 表示保留两位小数。",
+                          "minimum": 0
+                        },
+                        "rounding": {
+                          "type": "string",
+                          "title": "舍入方式",
+                          "description": "仅用于数值预置格式。half_up 表示四舍五入；truncate 表示截去多余位数。",
+                          "enum": [
+                            "half_up",
+                            "truncate"
+                          ]
+                        }
+                      },
+                      "additionalProperties": false,
+                      "description": "高速抽取应用的 number 或 date 字段及表格列可设置输出格式。可选预置格式，或用文字指定格式要求。",
+                      "title": "数值或日期的输出格式"
+                    }
+                  },
+                  "required": [
+                    "field_name",
+                    "field_key"
+                  ],
+                  "additionalProperties": false,
+                  "title": "表格列定义",
+                  "description": "填写一列的名称、类型和取值规则。例如，商品明细表中的“单价”列可选 number。"
+                },
+                "title": "表格列",
+                "description": "选择 table 时至少填写 1 列；按期望的返回顺序逐列填写名称和类型。其他字段类型省略此项。"
+              }
+            },
+            "required": [
+              "field_name",
+              "field_key",
+              "field_type"
+            ],
+            "additionalProperties": false,
+            "title": "抽取字段",
+            "description": "填写一个普通字段或表格字段的定义。表格的列在 sub_fields 中逐项填写。"
+          },
+          "description": "创建 1425 抽取应用时必填。定义需复用的字段，最多 100 个普通字段和 10 个表格，每表最多 30 列。字段和列的 key 在整个配置内唯一。",
+          "title": "应用抽取字段"
+        },
+        "classify_types": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 10,
+          "title": "分类类别",
+          "description": "创建 1426 分类应用时必填。配置 1 至 10 种要识别的材料，例如发票、合同和付款凭证。",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "category_key",
+              "type_name"
+            ],
+            "title": "单个分类类别",
+            "description": "定义一个要识别的文档类型，提供稳定的类别标识和文档类型名称，可补充判定依据。",
+            "properties": {
+              "category_key": {
+                "type": "string",
+                "pattern": "^[A-Za-z][A-Za-z0-9_]{0,63}$",
+                "title": "类别标识",
+                "description": "类别的唯一标识。以英文字母开头，后续可用英文字母、数字或下划线，最多 64 个字符，例如 invoice。"
+              },
+              "type_name": {
+                "type": "string",
+                "pattern": "\\S",
+                "minLength": 1,
+                "maxLength": 100,
+                "title": "文档类型名称",
+                "description": "类别名称，例如发票。各项去除首尾空白后须非空，名称不区分大小写唯一。UNCLASSIFIED 是保留名称。"
+              },
+              "description": {
+                "type": "string",
+                "maxLength": 1500,
+                "title": "类别说明",
+                "description": "说明如何识别此类别，或区分相似文档类型。例如，付款凭证应包含付款方、收款方和实付金额。"
+              }
+            }
+          }
+        },
+        "app_code": {
+          "type": "string",
+          "maxLength": 64,
+          "description": "仅适用于 1425 抽取应用。用于关联外部业务系统的可选编码，最多 64 个字符。",
+          "title": "应用业务编码"
+        },
+        "app_label": {
+          "type": "array",
+          "maxItems": 5,
+          "items": {
+            "type": "string",
+            "title": "单个业务标签",
+            "description": "填写一个用于归类应用的标签，例如“采购”。"
+          },
+          "description": "仅适用于 1425 抽取应用。按业务为抽取应用设置标签，最多 5 个，例如“采购”或“财务”。",
+          "title": "应用标签"
+        },
+        "enable_highlight": {
+          "type": "boolean",
+          "description": "仅适用于 1425 抽取应用。开启后，应用默认返回字段值在原文中的位置。",
+          "title": "返回字段的原文位置"
+        },
+        "enable_field_value_translation": {
+          "type": "boolean",
+          "description": "仅适用于 1425 抽取应用。开启后，应用默认翻译提取的字段值。",
+          "title": "翻译提取的字段值"
+        },
+        "enable_confidence": {
+          "type": "boolean",
+          "description": "仅适用于 1425 抽取应用。开启后，应用默认返回字段置信度。",
+          "title": "返回字段置信度"
+        },
+        "timeout_seconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 900,
+          "default": 300,
+          "description": "等待应用创建接口回执的最长秒数。",
+          "title": "等待时间（秒）"
+        }
+      },
+      "required": [
+        "app_name"
+      ],
+      "additionalProperties": false,
+      "description": "填写应用名称。创建抽取应用时传 extract_fields，ai_function 默认为 1425。创建分类应用时传 ai_function=1426 和 classify_types。"
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
+    },
+    "outputSchema": {
+      "type": "object",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "app_id": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "\\S"
+            },
+            "app_name": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "\\S"
+            },
+            "config_version": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "\\S"
+            },
+            "ai_function": {
+              "type": "integer",
+              "enum": [
+                1425,
+                1426
+              ]
+            },
+            "classify_types": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 10,
+              "items": {
+                "type": "object",
+                "required": [
+                  "category_key",
+                  "type_name"
+                ],
+                "properties": {
+                  "category_key": {
+                    "type": "string",
+                    "pattern": "^[A-Za-z][A-Za-z0-9_]{0,63}$"
+                  },
+                  "type_name": {
+                    "type": "string",
+                    "pattern": "\\S",
+                    "minLength": 1,
+                    "maxLength": 100
+                  },
+                  "description": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "maxLength": 1500
+                  }
+                }
+              }
+            }
+          },
+          "required": [
+            "app_id",
+            "app_name",
+            "config_version"
+          ],
+          "not": {
+            "properties": {
+              "status": {
+                "const": "failed"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "if": {
+            "required": [
+              "ai_function"
+            ],
+            "properties": {
+              "ai_function": {
+                "const": 1426
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "classify_types"
+            ]
+          }
+        },
+        {
+          "type": "object",
+          "properties": {
+            "status": {
+              "const": "failed"
+            },
+            "error": {
+              "type": "object"
+            }
+          },
+          "required": [
+            "status",
+            "error"
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "name": "update_extraction_app",
+    "title": "更新抽取应用",
+    "description": "按 app_id 修改有权管理的自定义抽取应用。只改名称或说明时直接提交该项。增删或修改字段时，先用 get_app 取得完整的 extract_fields，改动目标字段，并连同要保留的字段一起提交。返回应用 ID 和更新结果。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "app_id": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\S",
+          "description": "当前账号有权管理的自定义抽取应用 ID，可用 list_apps 按 engine_type=extract 和 source=custom 查找。",
+          "title": "应用 ID"
+        },
+        "app_name": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\S",
+          "maxLength": 50,
+          "description": "应用名称，最多 50 个字符。",
+          "title": "应用名称"
+        },
+        "description": {
+          "type": "string",
+          "maxLength": 1500,
+          "description": "省略时保留现有说明，传空字符串清除说明。",
+          "title": "应用说明"
+        },
+        "extract_fields": {
+          "type": "array",
+          "maxItems": 110,
+          "items": {
+            "type": "object",
+            "properties": {
+              "field_key": {
+                "type": "string",
+                "description": "保留现有字段和表格列的 key。高速自定义应用要求 key 全局唯一，长度 1 至 64，仅包含字母、数字或下划线，首字符为字母或数字。",
+                "title": "字段标识"
+              },
+              "field_name": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "\\S",
+                "maxLength": 50,
+                "title": "字段名称",
+                "description": "要输出的业务字段名称，最多 50 个字符，例如“合同金额”。"
+              },
+              "field_type": {
+                "enum": [
+                  "string",
+                  "number",
+                  "date",
+                  "table"
+                ],
+                "type": "string",
+                "title": "字段类型",
+                "description": "string 表示文本，number 表示数值，date 表示日期，table 表示包含多列的明细表。选择 table 时填写 sub_fields，其余类型省略 sub_fields。"
+              },
+              "field_prompt": {
+                "type": "string",
+                "maxLength": 3000,
+                "title": "取值规则",
+                "description": "普通字段或表格列的取值规则，最多 3000 个字符，例如“提取含税总金额”。表格本身的取值要求请填写在对应列中。"
+              },
+              "format": {
+                "type": "object",
+                "properties": {
+                  "mode": {
+                    "type": "string",
+                    "title": "格式设置方式",
+                    "description": "设置输出格式时必选。preset 使用预置格式，custom 按 instruction 中的文字要求输出。",
+                    "enum": [
+                      "preset",
+                      "custom"
+                    ]
+                  },
+                  "preset": {
+                    "type": "string",
+                    "title": "预置格式",
+                    "description": "mode 为 preset 时必选。数值可选 integer（整数）、decimal（小数）、grouped_integer（千分位整数）、grouped_decimal（千分位小数）；日期可选 date_iso（年-月-日）、date_slash（年/月/日）、date_cn（中文年月日）、datetime（日期和时间）。",
+                    "enum": [
+                      "integer",
+                      "decimal",
+                      "grouped_integer",
+                      "grouped_decimal",
+                      "date_iso",
+                      "date_slash",
+                      "date_cn",
+                      "datetime"
+                    ]
+                  },
+                  "instruction": {
+                    "type": "string",
+                    "title": "自定义格式要求",
+                    "description": "mode 为 custom 时必填。例如，填写“金额保留两位小数并附上币种”。",
+                    "minLength": 1,
+                    "pattern": "\\S"
+                  },
+                  "decimal_places": {
+                    "type": "integer",
+                    "title": "小数位数",
+                    "description": "仅在 preset 为 decimal 或 grouped_decimal 时填写。0 表示保留到整数位，2 表示保留两位小数。",
+                    "minimum": 0
+                  },
+                  "rounding": {
+                    "type": "string",
+                    "title": "舍入方式",
+                    "description": "仅用于数值预置格式。half_up 表示四舍五入；truncate 表示截去多余位数。",
+                    "enum": [
+                      "half_up",
+                      "truncate"
+                    ]
+                  }
+                },
+                "additionalProperties": false,
+                "description": "高速抽取应用的数值和日期字段或列可设置输出格式。更新字段时保留现有格式，除非需要改动。",
+                "title": "数值或日期的输出格式"
+              },
+              "sub_fields": {
+                "type": "array",
+                "maxItems": 30,
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "field_key": {
+                      "type": "string",
+                      "description": "保留现有字段和表格列的 key。高速自定义应用要求 key 全局唯一，长度 1 至 64，仅包含字母、数字或下划线，首字符为字母或数字。",
+                      "title": "列标识"
+                    },
+                    "field_name": {
+                      "type": "string",
+                      "minLength": 1,
+                      "pattern": "\\S",
+                      "maxLength": 50,
+                      "title": "列名称",
+                      "description": "该表格列的业务名称，最多 50 个字符，例如“商品单价”。"
+                    },
+                    "field_type": {
+                      "enum": [
+                        "string",
+                        "number",
+                        "date"
+                      ],
+                      "type": "string",
+                      "title": "列类型",
+                      "description": "string 表示文本，number 表示数值，date 表示日期。省略时使用 string。"
+                    },
+                    "field_prompt": {
+                      "type": "string",
+                      "maxLength": 3000,
+                      "title": "列取值规则",
+                      "description": "普通字段或表格列的取值规则，最多 3000 个字符，例如“提取含税总金额”。表格本身的取值要求请填写在对应列中。"
+                    },
+                    "format": {
+                      "type": "object",
+                      "properties": {
+                        "mode": {
+                          "type": "string",
+                          "title": "格式设置方式",
+                          "description": "设置输出格式时必选。preset 使用预置格式，custom 按 instruction 中的文字要求输出。",
+                          "enum": [
+                            "preset",
+                            "custom"
+                          ]
+                        },
+                        "preset": {
+                          "type": "string",
+                          "title": "预置格式",
+                          "description": "mode 为 preset 时必选。数值可选 integer（整数）、decimal（小数）、grouped_integer（千分位整数）、grouped_decimal（千分位小数）；日期可选 date_iso（年-月-日）、date_slash（年/月/日）、date_cn（中文年月日）、datetime（日期和时间）。",
+                          "enum": [
+                            "integer",
+                            "decimal",
+                            "grouped_integer",
+                            "grouped_decimal",
+                            "date_iso",
+                            "date_slash",
+                            "date_cn",
+                            "datetime"
+                          ]
+                        },
+                        "instruction": {
+                          "type": "string",
+                          "title": "自定义格式要求",
+                          "description": "mode 为 custom 时必填。例如，填写“金额保留两位小数并附上币种”。",
+                          "minLength": 1,
+                          "pattern": "\\S"
+                        },
+                        "decimal_places": {
+                          "type": "integer",
+                          "title": "小数位数",
+                          "description": "仅在 preset 为 decimal 或 grouped_decimal 时填写。0 表示保留到整数位，2 表示保留两位小数。",
+                          "minimum": 0
+                        },
+                        "rounding": {
+                          "type": "string",
+                          "title": "舍入方式",
+                          "description": "仅用于数值预置格式。half_up 表示四舍五入；truncate 表示截去多余位数。",
+                          "enum": [
+                            "half_up",
+                            "truncate"
+                          ]
+                        }
+                      },
+                      "additionalProperties": false,
+                      "description": "高速抽取应用的数值和日期字段或列可设置输出格式。更新字段时保留现有格式，除非需要改动。",
+                      "title": "数值或日期的输出格式"
+                    }
+                  },
+                  "required": [
+                    "field_name"
+                  ],
+                  "additionalProperties": false,
+                  "title": "表格列定义",
+                  "description": "填写一列的名称、类型和取值规则。例如，商品明细表中的“单价”列可选 number。"
+                },
+                "title": "表格列",
+                "description": "选择 table 时至少填写 1 列；按期望的返回顺序逐列填写名称和类型。其他字段类型省略此项。"
+              }
+            },
+            "required": [
+              "field_name",
+              "field_type"
+            ],
+            "additionalProperties": false,
+            "title": "抽取字段",
+            "description": "填写一个普通字段或表格字段的定义。表格的列在 sub_fields 中逐项填写。"
+          },
+          "description": "仅在修改字段时提交完整列表，至少 1 项。保留仍需使用的字段、提示词、表格列和格式。高速版最多 100 个普通字段、10 个表格，每表最多 30 列。经典版最多 20 个顶层字段，每表最多 20 列。",
+          "title": "应用抽取字段"
+        },
+        "config_version": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\S",
+          "description": "仅在更新 extract_fields 时填写参考配置版本。可从 get_app 取得，用于保留原有字段规则。",
+          "title": "配置版本"
+        }
+      },
+      "required": [
+        "app_id"
+      ],
+      "additionalProperties": false,
+      "description": "填写 app_id，并至少提交应用名称、应用说明或完整抽取字段列表中的一项。"
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "idempotentHint": false,
+      "openWorldHint": false
+    },
+    "outputSchema": {
+      "type": "object",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "app_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "app_name": {
+              "type": "string"
+            },
+            "config_version": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "app_id"
+          ],
+          "not": {
+            "properties": {
+              "status": {
+                "const": "failed"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          }
+        },
+        {
+          "type": "object",
+          "properties": {
+            "status": {
+              "const": "failed"
+            },
+            "error": {
+              "type": "object"
+            }
+          },
+          "required": [
+            "status",
+            "error"
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "name": "delete_extraction_app",
+    "title": "删除抽取应用",
+    "description": "按 app_id 删除有权管理的自定义抽取应用及其关联配置和抽取数据，返回删除结果。仅在用户明确要求删除整个抽取应用时调用。只知道名称时用 list_apps 按 engine_type=extract 和 source=custom 查找，有重名时核实目标。要停止一次排队中的文档任务时用 cancel_task。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "app_id": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\S",
+          "description": "当前账号有权管理的自定义抽取应用 ID，可用 list_apps 按 engine_type=extract 和 source=custom 查找。",
+          "title": "应用 ID"
+        }
+      },
+      "required": [
+        "app_id"
+      ],
+      "additionalProperties": false,
+      "description": "填写要删除的自定义抽取应用 ID。"
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "idempotentHint": false,
+      "openWorldHint": false
+    },
+    "outputSchema": {
+      "type": "object",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "success": {
+              "type": "boolean"
+            },
+            "message": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "success"
+          ],
+          "not": {
+            "properties": {
+              "status": {
+                "const": "failed"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          }
+        },
+        {
+          "type": "object",
+          "properties": {
+            "status": {
+              "const": "failed"
+            },
+            "error": {
+              "type": "object"
+            }
+          },
+          "required": [
+            "status",
+            "error"
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "name": "list_apps",
+    "title": "获取应用列表",
+    "description": "分页列出当前账号可访问的抽取、解析和分类应用，返回名称、`app_id`、业务类型和来源。查找特定应用时，在本次查询中传入用户已给出的条件。\n\n- 用户点名团队抽取应用时，传 `app_name`、`engine_type=extract` 和 `source=custom`。例如“用我们团队的采购合同应用”，传 `{\"app_name\":\"采购合同\",\"engine_type\":\"extract\",\"source\":\"custom\"}`。\n- 用户只给应用名称时，传 `app_name` 和已知的业务类型，省略 `source` 以同时查预置和自定义应用。\n- 用户只给文档类型并希望抽取时，传 `document_type`、`engine_type=extract` 和 `source=preset`。\n\n用户要浏览全部应用时可传 `{}`，按需分页。已知 `app_id` 且需要详情时用 `get_app`。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "app_name": {
+          "type": "string",
+          "description": "按应用名称筛选。",
+          "title": "应用名称"
+        },
+        "engine_type": {
+          "type": "string",
+          "enum": [
+            "extract",
+            "parse",
+            "classify"
+          ],
+          "description": "选择 extract（文档抽取）、parse（文档解析）或 classify（文档分类）。省略时合并列出这三类应用。",
+          "title": "应用业务类型"
+        },
+        "source": {
+          "type": "string",
+          "enum": [
+            "all",
+            "preset",
+            "custom"
+          ],
+          "default": "all",
+          "description": "preset 表示平台预置，custom 表示自定义。默认值 all 包含两种来源。",
+          "title": "应用来源"
+        },
+        "document_type": {
+          "type": "string",
+          "description": "查找指定文档类型的抽取应用，例如身份证、采购订单或发票。填写时 engine_type 可选 extract，也可省略。",
+          "title": "抽取文档类型"
+        },
+        "with_output_schema": {
+          "type": "boolean",
+          "default": false,
+          "description": "请求附带可用的输出字段定义。对于抽取应用，返回可用的最新已发布配置的输出字段。",
+          "title": "附带应用的输出字段定义"
+        },
+        "offset": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "从第几条记录开始取，按 0 计数。跳过前 20 条时填 20。",
+          "default": 0,
+          "title": "跳过的记录数"
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "每页返回的条数，默认 20，仍受当前连接的分页上限约束。",
+          "default": 20,
+          "maximum": 1000,
+          "title": "每页条数"
+        }
+      },
+      "additionalProperties": false,
+      "description": "按需填写筛选条件；省略筛选条件时分页返回可见应用。"
+    },
+    "annotations": {
+      "readOnlyHint": true
+    },
+    "outputSchema": {
+      "type": "object",
+      "properties": {
+        "status": {
+          "enum": [
+            "succeeded",
+            "failed"
+          ]
+        },
+        "data": {
+          "type": "object",
+          "properties": {
+            "list": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "app_id": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "app_name": {
+                    "type": "string"
+                  },
+                  "engine_type": {
+                    "enum": [
+                      "extract",
+                      "parse",
+                      "classify"
+                    ]
+                  },
+                  "source": {
+                    "enum": [
+                      "preset",
+                      "custom"
+                    ]
+                  },
+                  "output_schema": {
+                    "type": [
+                      "object",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "app_id",
+                  "app_name",
+                  "engine_type",
+                  "source"
+                ]
+              }
+            },
+            "range": {
+              "type": "object",
+              "properties": {
+                "offset": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "size": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "total": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              },
+              "required": [
+                "offset",
+                "size",
+                "total"
+              ]
+            }
+          },
+          "required": [
+            "list",
+            "range"
+          ]
+        },
+        "error": {
+          "type": "object"
+        }
+      },
+      "required": [
+        "status"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "succeeded"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "data"
+            ]
+          },
+          "else": {
+            "required": [
+              "error"
+            ]
+          }
+        }
+      ]
+    }
+  },
+  {
+    "name": "get_app",
+    "title": "获取应用详情",
+    "description": "确认应用详细配置时调用。可通过`app_id`查询抽取应用的详细信息，包含应用名称、描述、字段配置（抽取字段、字段类型与抽取提示词）、配置版本、解析模式等。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "app_id": {
+          "type": "string",
+          "minLength": 1,
+          "description": "要查看的抽取应用 ID，可从 list_apps 获取。预置应用提供公开的输出字段（如有）。自定义抽取应用可返回当前账号可读的字段配置和提示词。标准版可返回解析模式，高速自定义抽取的解析模式为空。",
+          "title": "应用 ID"
+        },
+        "config_version": {
+          "type": "string",
+          "minLength": 1,
+          "description": "仅用于指定自定义抽取应用的配置版本。省略时读取该应用最新保存的配置。查看预置抽取应用或其他类型的应用时省略。",
+          "title": "配置版本"
+        }
+      },
+      "required": [
+        "app_id"
+      ],
+      "additionalProperties": false,
+      "description": "填写应用 ID。仅在查看指定的自定义抽取配置时填写配置版本。"
+    },
+    "annotations": {
+      "readOnlyHint": true
+    },
+    "outputSchema": {
+      "type": "object",
+      "properties": {
+        "status": {
+          "enum": [
+            "succeeded",
+            "failed"
+          ]
+        },
+        "data": {
+          "type": "object",
+          "properties": {
+            "app_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "app_name": {
+              "type": "string"
+            },
+            "engine_type": {
+              "enum": [
+                "extract",
+                "parse",
+                "classify",
+                "workflow"
+              ]
+            },
+            "source": {
+              "enum": [
+                "preset",
+                "custom"
+              ]
+            },
+            "output_schema": {
+              "type": [
+                "object",
+                "null"
+              ]
+            },
+            "extract_fields": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 110,
+              "items": {
+                "$ref": "#/$defs/field"
+              },
+              "description": "仅在当前账号能读取自定义抽取应用的完整可编辑字段配置时返回。保留原字段 key、提示词、表格列归属和已配置的格式。普通字段省略 sub_fields。没有 key 的经典版字段省略 field_key。该列表可按 update_extraction_app 的 extract_fields 原样回传。"
+            },
+            "config_version": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "app_id",
+            "app_name",
+            "engine_type",
+            "source"
+          ]
+        },
+        "error": {
+          "type": "object"
+        }
+      },
+      "required": [
+        "status"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "succeeded"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "data"
+            ]
+          },
+          "else": {
+            "required": [
+              "error"
+            ]
+          }
+        }
+      ],
+      "$defs": {
+        "number_format": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "object",
+              "properties": {
+                "mode": {
+                  "const": "custom"
+                },
+                "instruction": {
+                  "type": "string",
+                  "minLength": 1,
+                  "pattern": "\\S",
+                  "description": "自定义输出格式要求。"
+                }
+              },
+              "required": [
+                "mode",
+                "instruction"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "mode": {
+                  "const": "preset"
+                },
+                "preset": {
+                  "enum": [
+                    "integer",
+                    "grouped_integer"
+                  ]
+                },
+                "rounding": {
+                  "enum": [
+                    "half_up",
+                    "truncate"
+                  ]
+                }
+              },
+              "required": [
+                "mode",
+                "preset"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "mode": {
+                  "const": "preset"
+                },
+                "preset": {
+                  "enum": [
+                    "decimal",
+                    "grouped_decimal"
+                  ]
+                },
+                "decimal_places": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "rounding": {
+                  "enum": [
+                    "half_up",
+                    "truncate"
+                  ]
+                }
+              },
+              "required": [
+                "mode",
+                "preset"
+              ],
+              "additionalProperties": false
+            }
+          ]
+        },
+        "date_format": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "object",
+              "properties": {
+                "mode": {
+                  "const": "custom"
+                },
+                "instruction": {
+                  "type": "string",
+                  "minLength": 1,
+                  "pattern": "\\S",
+                  "description": "自定义输出格式要求。"
+                }
+              },
+              "required": [
+                "mode",
+                "instruction"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "mode": {
+                  "const": "preset"
+                },
+                "preset": {
+                  "enum": [
+                    "date_iso",
+                    "date_slash",
+                    "date_cn",
+                    "datetime"
+                  ]
+                }
+              },
+              "required": [
+                "mode",
+                "preset"
+              ],
+              "additionalProperties": false
+            }
+          ]
+        },
+        "column": {
+          "type": "object",
+          "properties": {
+            "field_key": {
+              "type": "string",
+              "description": "保留现有字段和表格列的 key。高速自定义应用要求 key 全局唯一，长度 1 至 64，仅包含字母、数字或下划线，首字符为字母或数字。"
+            },
+            "field_name": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "\\S",
+              "maxLength": 50
+            },
+            "field_type": {
+              "enum": [
+                "string",
+                "number",
+                "date"
+              ],
+              "default": "string"
+            },
+            "field_prompt": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "maxLength": 3000
+            },
+            "format": {
+              "description": "高速自定义应用可为数值和日期配置输出格式。",
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/number_format"
+                },
+                {
+                  "$ref": "#/$defs/date_format"
+                }
+              ]
+            }
+          },
+          "required": [
+            "field_name"
+          ],
+          "additionalProperties": false,
+          "allOf": [
+            {
+              "if": {
+                "required": [
+                  "field_type"
+                ],
+                "properties": {
+                  "field_type": {
+                    "const": "number"
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "format": {
+                    "$ref": "#/$defs/number_format"
+                  }
+                }
+              }
+            },
+            {
+              "if": {
+                "required": [
+                  "field_type"
+                ],
+                "properties": {
+                  "field_type": {
+                    "const": "date"
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "format": {
+                    "$ref": "#/$defs/date_format"
+                  }
+                }
+              }
+            },
+            {
+              "if": {
+                "not": {
+                  "anyOf": [
+                    {
+                      "required": [
+                        "field_type"
+                      ]
+                    }
+                  ]
+                }
+              },
+              "then": {
+                "properties": {
+                  "format": {
+                    "type": "null"
+                  }
+                }
+              }
+            },
+            {
+              "if": {
+                "required": [
+                  "field_type"
+                ],
+                "properties": {
+                  "field_type": {
+                    "const": "string"
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "format": {
+                    "type": "null"
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "field": {
+          "type": "object",
+          "properties": {
+            "field_key": {
+              "type": "string",
+              "description": "保留现有字段和表格列的 key。高速自定义应用要求 key 全局唯一，长度 1 至 64，仅包含字母、数字或下划线，首字符为字母或数字。"
+            },
+            "field_name": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "\\S",
+              "maxLength": 50
+            },
+            "field_type": {
+              "enum": [
+                "string",
+                "number",
+                "date",
+                "table"
+              ]
+            },
+            "field_prompt": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "maxLength": 3000
+            },
+            "format": {
+              "description": "高速自定义应用可为数值和日期配置输出格式。",
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/number_format"
+                },
+                {
+                  "$ref": "#/$defs/date_format"
+                }
+              ]
+            },
+            "sub_fields": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 30,
+              "items": {
+                "$ref": "#/$defs/column"
+              }
+            }
+          },
+          "required": [
+            "field_name",
+            "field_type"
+          ],
+          "additionalProperties": false,
+          "allOf": [
+            {
+              "if": {
+                "required": [
+                  "field_type"
+                ],
+                "properties": {
+                  "field_type": {
+                    "const": "number"
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "format": {
+                    "$ref": "#/$defs/number_format"
+                  }
+                }
+              }
+            },
+            {
+              "if": {
+                "required": [
+                  "field_type"
+                ],
+                "properties": {
+                  "field_type": {
+                    "const": "date"
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "format": {
+                    "$ref": "#/$defs/date_format"
+                  }
+                }
+              }
+            },
+            {
+              "if": {
+                "not": {
+                  "anyOf": [
+                    {
+                      "required": [
+                        "field_type"
+                      ]
+                    }
+                  ]
+                }
+              },
+              "then": {
+                "properties": {
+                  "format": {
+                    "type": "null"
+                  }
+                }
+              }
+            },
+            {
+              "if": {
+                "required": [
+                  "field_type"
+                ],
+                "properties": {
+                  "field_type": {
+                    "const": "string"
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "format": {
+                    "type": "null"
+                  }
+                }
+              }
+            },
+            {
+              "if": {
+                "required": [
+                  "field_type"
+                ],
+                "properties": {
+                  "field_type": {
+                    "const": "table"
+                  }
+                }
+              },
+              "then": {
+                "required": [
+                  "sub_fields"
+                ],
+                "properties": {
+                  "field_prompt": {
+                    "type": "null"
+                  },
+                  "format": {
+                    "type": "null"
+                  }
+                }
+              }
+            },
+            {
+              "if": {
+                "required": [
+                  "sub_fields"
+                ]
+              },
+              "then": {
+                "properties": {
+                  "field_type": {
+                    "const": "table"
+                  }
+                }
+              }
+            }
+          ]
+        }
+      }
+    }
+  },
+  {
+    "name": "verify_invoice",
+    "title": "发票验真",
+    "description": "根据票面字段查验一张中国大陆发票，适用于中国区支持的票种。提供票种、发票号码、开票日期，以及该票种要求的发票代码、金额或校验码，保留号码前导零。若用户只提供发票图片或 PDF，先用 `extract_document` 从票面读出这些字段，再按票种提交查验。按 `verification_status` 报告票面信息一致、不一致、未查到或无法判定，并说明返回的作废或红冲状态。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "type_key": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\S",
+          "description": "按票面确认票种后选择。仅确认全电普通发票时可省略。vat_special_invoice（增值税专用发票）、vat_electronic_special_invoice（增值税电子专用发票）、vat_common_invoice（增值税普通发票）、vat_electronic_invoice（增值税电子普通发票）、vat_roll_invoice（增值税发票卷票）、vat_electronic_special_invoice_new（电子发票增值税专用发票）、vat_electronic_invoice_new（电子发票普通发票）、motor_vehicle_sale_invoice（机动车销售统一发票）、used_car_purchase_invoice（二手车销售统一发票）、electronic_air_transport（电子发票航空运输电子客票行程单）、electronic_train_ticket（电子发票铁路电子客票）。",
+          "enum": [
+            "vat_special_invoice",
+            "vat_electronic_special_invoice",
+            "vat_common_invoice",
+            "vat_electronic_invoice",
+            "vat_roll_invoice",
+            "vat_electronic_special_invoice_new",
+            "vat_electronic_invoice_new",
+            "motor_vehicle_sale_invoice",
+            "used_car_purchase_invoice",
+            "electronic_air_transport",
+            "electronic_train_ticket"
+          ],
+          "default": "vat_electronic_invoice_new",
+          "title": "发票票种"
+        },
+        "fpNumber": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\S",
+          "description": "票面发票号码，按原样填写，保留前导零。所有票种均必填。",
+          "title": "发票号码"
+        },
+        "fpDate": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\S",
+          "description": "票面开票日期、填制日期或乘车日期，例如 2026-06-01。所有票种均必填。",
+          "title": "票面日期"
+        },
+        "fpCode": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\S",
+          "description": "发票代码，保留前导零。以下票种必填：增值税专用发票、增值税电子专用发票、增值税普通发票、增值税电子普通发票、增值税发票卷票、机动车销售统一发票、二手车销售统一发票。",
+          "title": "发票代码"
+        },
+        "fpAmount": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\S",
+          "description": "票面价税合计、票价或合计金额，按对应票种填写金额字符串。以下票种必填：电子发票增值税专用发票、电子发票普通发票、二手车销售统一发票、电子发票航空运输电子客票行程单、电子发票铁路电子客票。",
+          "title": "价税合计或票面金额"
+        },
+        "fpNoTaxAmount": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\S",
+          "description": "票面不含税金额，填写金额字符串。以下票种必填：增值税专用发票、增值税电子专用发票、机动车销售统一发票。",
+          "title": "不含税金额"
+        },
+        "fpCRC": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\S",
+          "description": "票面校验码，可填写完整号码，服务使用末六位。以下票种必填：增值税普通发票、增值税电子普通发票、增值税发票卷票。",
+          "title": "票面校验码"
+        },
+        "instance_id": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\S",
+          "description": "可选的业务实例 ID，省略时由服务生成。",
+          "title": "业务实例 ID"
+        }
+      },
+      "required": [
+        "fpNumber",
+        "fpDate"
+      ],
+      "additionalProperties": false,
+      "description": "按票面选择票种，填写发票号码、票面日期及相应票种要求的字段。"
+    },
+    "outputSchema": {
+      "type": "object",
+      "required": [
+        "status"
+      ],
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": [
+            "succeeded",
+            "failed"
+          ],
+          "description": "本次查验的执行状态。一致、不一致和未查到均为 succeeded。"
+        },
+        "verification_status": {
+          "type": "string",
+          "enum": [
+            "consistent",
+            "inconsistent",
+            "not_found",
+            "unverifiable",
+            "unsupported",
+            "unknown"
+          ],
+          "description": "consistent 为票面信息一致，inconsistent 为不一致，not_found 为未查到匹配发票，unverifiable 为本次无法查验，unsupported 为票种不支持，unknown 为未获得可判定的结论。"
+        },
+        "data": {
+          "type": "object",
+          "description": "服务返回的原始验真数据。result.fpVerification 为原始查验结论，result.fpIsVoided 为票据作废或冲红状态，result.fpVerificationMsg 为补充说明。按回执中实际返回的值报告。"
+        },
+        "error": {
+          "type": "object",
+          "description": "失败时返回的错误信息。若受理状态无法确认，避免自动重复提交。"
+        },
+        "usage_status": {
+          "type": "string",
+          "enum": [
+            "available",
+            "unavailable"
+          ],
+          "description": "本次查验是否有已记录的积分金额。"
+        },
+        "recorded_credits": {
+          "type": "number",
+          "minimum": 0,
+          "description": "服务端已记录的本次积分金额。"
+        },
+        "usage": {
+          "type": "object",
+          "description": "本次请求已有的用量明细。"
+        },
+        "next_steps": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          },
+          "description": "失败时返回的后续处理建议（如有）。"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "succeeded"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "verification_status",
+              "data"
+            ],
+            "properties": {
+              "verification_status": {
+                "enum": [
+                  "consistent",
+                  "inconsistent",
+                  "not_found"
+                ]
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "verification_status": {
+                "enum": [
+                  "unverifiable",
+                  "unsupported",
+                  "unknown"
+                ]
+              }
+            }
+          }
+        }
+      ]
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": true
+    }
+  },
+  {
+    "name": "get_task",
+    "title": "获取任务详情",
+    "description": "获取一个文档解析、抽取或分类任务的状态、可用结果和已记录的积分消耗。异步提交后，将原调用返回的 task_ref 原样传入。使用单独记录的任务 ID 时，同时传 task_id 和 task_type。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "task_ref": {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "parse",
+                "extract",
+                "classify"
+              ],
+              "description": "parse 表示解析，extract 表示抽取，classify 表示分类。",
+              "title": "任务类型"
+            },
+            "id": {
+              "type": "string",
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9_-]+$",
+              "description": "该次文档任务的 ID。",
+              "title": "任务 ID"
+            }
+          },
+          "additionalProperties": false,
+          "description": "可直接粘贴原调用返回的 task_ref，须含 kind 和 id。使用 task_id 和 task_type 时省略整个对象。",
+          "title": "原任务引用"
+        },
+        "task_id": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9_-]+$",
+          "description": "只有原始文档任务 ID 时填写，同时提供 task_type。",
+          "title": "任务 ID"
+        },
+        "task_type": {
+          "type": "string",
+          "enum": [
+            "parse",
+            "extract",
+            "classify"
+          ],
+          "description": "配合 task_id 选择任务类型。parse 表示解析，extract 表示抽取，classify 表示分类。",
+          "title": "任务类型"
+        }
+      },
+      "additionalProperties": false,
+      "description": "使用原任务引用，或同时填写任务 ID 和任务类型。两种方式任选其一。"
+    },
+    "annotations": {
+      "readOnlyHint": true
+    },
+    "outputSchema": {
+      "type": "object",
+      "properties": {
+        "status": {
+          "enum": [
+            "succeeded",
+            "pending",
+            "failed",
+            "cancelled"
+          ]
+        },
+        "action": {
+          "const": "query"
+        },
+        "task_ref": {
+          "$ref": "#/$defs/task_ref"
+        },
+        "next_steps": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "message": {
+                "type": "string",
+                "minLength": 1
+              },
+              "tool": {
+                "const": "get_task"
+              },
+              "arguments": {
+                "type": "object",
+                "properties": {
+                  "task_ref": {
+                    "$ref": "#/$defs/task_ref"
+                  }
+                },
+                "required": [
+                  "task_ref"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "message"
+            ],
+            "dependentRequired": {
+              "tool": [
+                "arguments"
+              ],
+              "arguments": [
+                "tool"
+              ]
+            },
+            "additionalProperties": false
+          }
+        },
+        "data": {
+          "type": "object"
+        },
+        "error": {
+          "type": "object",
+          "properties": {
+            "message": {
+              "type": "string",
+              "minLength": 1
+            },
+            "code": {
+              "type": "string"
+            },
+            "acceptance_unknown": {
+              "type": "boolean"
+            },
+            "retryable": {
+              "type": "boolean"
+            },
+            "retry_after_ms": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "message"
+          ]
+        },
+        "usage_status": {
+          "enum": [
+            "available",
+            "unavailable"
+          ]
+        },
+        "recorded_credits": {
+          "type": "number",
+          "minimum": 0
+        },
+        "usage": {
+          "type": "object",
+          "properties": {
+            "credits_consumed": {
+              "type": "number",
+              "minimum": 0
+            },
+            "num_pages": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "billing_breakdown": {
+              "type": "object"
+            }
+          }
+        }
+      },
+      "required": [
+        "status"
+      ],
+      "$defs": {
+        "task_ref": {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "enum": [
+                "parse",
+                "extract",
+                "classify"
+              ]
+            },
+            "id": {
+              "type": "string",
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9_-]+$"
+            }
+          },
+          "required": [
+            "kind",
+            "id"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "failed"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "required": [
+              "error"
+            ]
+          },
+          "else": {
+            "required": [
+              "task_ref",
+              "data"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "pending"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "required": [
+              "next_steps"
+            ],
+            "properties": {
+              "next_steps": {
+                "contains": {
+                  "type": "object",
+                  "required": [
+                    "tool"
+                  ],
+                  "properties": {
+                    "tool": {
+                      "const": "get_task"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
+    }
+  },
+  {
+    "name": "cancel_task",
+    "title": "取消任务",
+    "description": "用户要求停止处理时，取消一个仍在排队且尚未被工作节点领取的解析、抽取或分类任务。传原调用返回的 task_ref，或同时传 task_id 和 task_type。顶层 status 表示取消操作的结果，data.status 表示任务的状态。无法确认取消结果时，用原引用调用 get_task。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "task_ref": {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "parse",
+                "extract",
+                "classify"
+              ],
+              "description": "parse 表示解析，extract 表示抽取，classify 表示分类。",
+              "title": "任务类型"
+            },
+            "id": {
+              "type": "string",
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9_-]+$",
+              "description": "该次文档任务的 ID。",
+              "title": "任务 ID"
+            }
+          },
+          "additionalProperties": false,
+          "description": "可直接粘贴原调用返回的 task_ref，须含 kind 和 id。使用 task_id 和 task_type 时省略整个对象。",
+          "title": "原任务引用"
+        },
+        "task_id": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9_-]+$",
+          "description": "只有原始文档任务 ID 时填写，同时提供 task_type。",
+          "title": "任务 ID"
+        },
+        "task_type": {
+          "type": "string",
+          "enum": [
+            "parse",
+            "extract",
+            "classify"
+          ],
+          "description": "配合 task_id 选择任务类型。parse 表示解析，extract 表示抽取，classify 表示分类。",
+          "title": "任务类型"
+        }
+      },
+      "additionalProperties": false,
+      "description": "使用原任务引用，或同时填写任务 ID 和任务类型。两种方式任选其一。"
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "idempotentHint": true
+    },
+    "outputSchema": {
+      "type": "object",
+      "properties": {
+        "status": {
+          "enum": [
+            "succeeded",
+            "failed"
+          ]
+        },
+        "action": {
+          "const": "cancel"
+        },
+        "task_ref": {
+          "$ref": "#/$defs/task_ref"
+        },
+        "data": {
+          "type": "object",
+          "properties": {
+            "task_id": {
+              "type": "string",
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9_-]+$"
+            },
+            "status": {
+              "enum": [
+                "cancelled",
+                "running",
+                "succeeded",
+                "failed"
+              ]
+            },
+            "cancelled": {
+              "type": "boolean"
+            },
+            "already_cancelled": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "task_id",
+            "status",
+            "cancelled",
+            "already_cancelled"
+          ]
+        },
+        "error": {
+          "type": "object",
+          "properties": {
+            "message": {
+              "type": "string",
+              "minLength": 1
+            },
+            "code": {
+              "type": "string"
+            },
+            "acceptance_unknown": {
+              "type": "boolean"
+            },
+            "retryable": {
+              "type": "boolean"
+            },
+            "retry_after_ms": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "message"
+          ]
+        },
+        "next_steps": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "message": {
+                "type": "string",
+                "minLength": 1
+              },
+              "tool": {
+                "const": "get_task"
+              },
+              "arguments": {
+                "type": "object",
+                "properties": {
+                  "task_ref": {
+                    "$ref": "#/$defs/task_ref"
+                  }
+                },
+                "required": [
+                  "task_ref"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "message"
+            ],
+            "dependentRequired": {
+              "tool": [
+                "arguments"
+              ],
+              "arguments": [
+                "tool"
+              ]
+            },
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "status"
+      ],
+      "$defs": {
+        "task_ref": {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "enum": [
+                "parse",
+                "extract",
+                "classify"
+              ]
+            },
+            "id": {
+              "type": "string",
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9_-]+$"
+            }
+          },
+          "required": [
+            "kind",
+            "id"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "succeeded"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "required": [
+              "task_ref",
+              "data"
+            ],
+            "properties": {
+              "data": {
+                "properties": {
+                  "status": {
+                    "const": "cancelled"
+                  },
+                  "cancelled": {
+                    "const": true
+                  }
+                }
+              }
+            }
+          },
+          "else": {
+            "required": [
+              "error"
+            ]
+          }
+        }
+      ]
+    }
+  },
+  {
+    "name": "get_credits",
+    "title": "获取积分汇总",
+    "description": "查询当前授权账号的积分汇总，返回总积分、已用积分、已过期积分和剩余积分。适合回答“账号还剩多少积分”。要查某次文档处理的用量，读取任务结果中的 `usage`，异步任务可用 `get_task` 续查。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {},
+      "additionalProperties": false,
+      "description": "无需填写参数。"
+    },
+    "annotations": {
+      "readOnlyHint": true
+    },
+    "outputSchema": {
+      "type": "object",
+      "properties": {
+        "status": {
+          "enum": [
+            "succeeded",
+            "failed"
+          ]
+        },
+        "data": {
+          "type": "object",
+          "properties": {
+            "total_credits": {
+              "type": "number"
+            },
+            "used_credits": {
+              "type": "number"
+            },
+            "expired_credits": {
+              "type": "number"
+            },
+            "remaining_credits": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "total_credits",
+            "used_credits",
+            "expired_credits",
+            "remaining_credits"
+          ]
+        },
+        "error": {
+          "type": "object"
+        }
+      },
+      "required": [
+        "status"
+      ],
+      "if": {
+        "properties": {
+          "status": {
+            "const": "succeeded"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "data"
+        ]
+      },
+      "else": {
+        "required": [
+          "error"
+        ]
+      }
+    }
+  },
+  {
+    "name": "submit_user_feedback",
+    "title": "提交用户反馈",
+    "description": "当用户明确要求或同意向 ADP 提交使用问题、功能需求或改进建议时，调用此工具。提交反馈类型、问题摘要和相关业务背景。仅在用户明确授权后附带指定的运行日志、抽取配置或运行文件，并按需关联可用于跟进的联系方式。返回提交状态，以及接口提供的反馈编号。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "feedback_type": {
+          "type": "string",
+          "enum": [
+            "issue",
+            "suggestion"
+          ],
+          "title": "反馈类型",
+          "description": "issue 表示使用问题，suggestion 表示改进建议。"
+        },
+        "content": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1000,
+          "pattern": "\\S",
+          "title": "反馈内容",
+          "description": "概述使用场景、预期结果和实际情况，最多 1000 个字符。"
+        },
+        "allow_follow_up": {
+          "type": "boolean",
+          "default": true,
+          "title": "允许联系",
+          "description": "是否允许 ADP 通过当前账号联系用户以跟进反馈，默认允许。"
+        },
+        "attachment_paths": {
+          "type": "array",
+          "maxItems": 5,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "\\S",
+            "title": "附件路径",
+            "description": "一个可读取的本地文件路径或 file:/// 地址。"
+          },
+          "title": "本地附件",
+          "description": "可选。填写用户同意提交的本地文件路径，最多 5 个，每个不超过 50 MiB。"
+        },
+        "attachments_authorized": {
+          "type": "boolean",
+          "default": false,
+          "title": "用户已同意提交附件",
+          "description": "用户明确同意提交本次所列附件时设为 true。仅提交文字反馈时可省略。"
+        }
+      },
+      "required": [
+        "feedback_type",
+        "content"
+      ],
+      "additionalProperties": false,
+      "description": "填写反馈类型和反馈内容，可指定是否允许 ADP 联系跟进。附上本地文件时，须填写用户同意提交的附件路径并确认已获得授权。"
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": true
+    },
+    "outputSchema": {
+      "type": "object",
+      "properties": {
+        "status": {
+          "enum": [
+            "succeeded",
+            "failed"
+          ]
+        },
+        "data": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "created_at": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "required": [
+            "id",
+            "created_at"
+          ]
+        },
+        "error": {
+          "type": "object"
+        }
+      },
+      "required": [
+        "status"
+      ],
+      "if": {
+        "properties": {
+          "status": {
+            "const": "succeeded"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "data"
+        ]
+      },
+      "else": {
+        "required": [
+          "error"
+        ]
+      }
+    }
+  }
+]
