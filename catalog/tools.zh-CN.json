@@ -583,8 +583,8 @@
         },
         "enable_invoice_verify": {
           "type": "boolean",
-          "description": "仅中国区的国内通用票据预置应用接受此参数。传 true 随本次抽取查验支持的发票，false 关闭，省略时沿用应用设置。其他应用请省略此参数，传 false 也会报错。",
-          "title": "随单验真（中国区国内通用票据预置）"
+          "description": "仅中国区的国内通用票据应用接受此参数，可使用预置应用或同类型的账号应用 ID。传 true 随本次抽取查验支持的发票，false 关闭，省略时沿用应用设置。其他类型应用请省略此参数，传 false 也会报错。",
+          "title": "随单验真（中国区国内通用票据）"
         },
         "enable_field_value_translation": {
           "type": "boolean",

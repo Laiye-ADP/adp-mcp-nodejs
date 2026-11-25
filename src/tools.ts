@@ -327,13 +327,14 @@ async function runTool(name: string, args: JsonObject, client: AdpClient, versio
         return extractDirect(typeof file.url === "string" ? { url: normalizeFileUrl(file.url) } : file, fields, client, signal);
       }
       const appId = (args.app_id as string).trim();
-      if (args.enable_invoice_verify !== undefined && appId !== domesticBillsAppId) {
-        throw new Error("enable_invoice_verify 仅支持国内通用票据预置应用。");
-      }
-      if (appId.startsWith("ootb_")) {
-        const preset = await getAppDetail(client, appId, signal);
-        if (preset.source !== "preset" || preset.engine_type !== "extract") {
+      if (appId.startsWith("ootb_") || args.enable_invoice_verify !== undefined) {
+        const detail = await getAppDetail(client, appId, signal);
+        if (appId.startsWith("ootb_") && (detail.source !== "preset" || detail.engine_type !== "extract")) {
           throw new AdpApiError("请选择当前账号可用的预置抽取应用。", { code: "EXTRACTION_PRESET_REQUIRED", retryable: false });
+        }
+        if (args.enable_invoice_verify !== undefined && appId !== domesticBillsAppId
+            && (detail.engine_type !== "extract" || detail.ai_function !== 1410)) {
+          throw new Error("enable_invoice_verify 仅支持国内通用票据应用。");
         }
       }
       const options = selectOptions(args, ["with_rec_result", "enable_multi_ticket", "enable_invoice_verify",
@@ -396,7 +397,7 @@ async function processDocument(kind: TaskKind, args: JsonObject, body: JsonObjec
     if (status === "succeeded" && !syncResultFields[kind].every(field => Array.isArray(data[field]))) {
       throw unknownReceipt("同步接口未返回完整的文档处理结果。", 502);
     }
-    return documentResult(envelope, data, status, client);
+    return documentResult(envelope, data, status, client, extractFailureTips(kind, data, envelope));
   } catch (error) {
     if (signal?.aborted) throw error;
     if (error instanceof AdpApiError && (error.details.code === "REQUEST_TIMEOUT" || error.details.api_code === "timeout"
@@ -593,7 +594,11 @@ async function queryTask(ref: TaskRef, client: AdpClient, signal?: AbortSignal):
   if (data[taskActions[ref.kind].idKey] !== ref.id) throw new Error("查询响应中的任务 ID 与原任务不一致。");
   const status = taskStatus(ref.kind, data.status);
   if (!status) throw new Error("查询接口未返回可识别的任务状态。");
-  return taskResult(envelope, data, ref, status, client);
+  return taskResult(envelope, data, ref, status, client, extractFailureTips(ref.kind, data, envelope));
+}
+
+function extractFailureTips(kind: TaskKind, data: JsonObject, envelope: JsonObject): unknown {
+  return kind === "extract" && data.response_type === "extract" ? envelope.tips : undefined;
 }
 
 function taskStatus(kind: TaskKind, status: unknown): ResultStatus | undefined {
@@ -612,7 +617,7 @@ function taskStatus(kind: TaskKind, status: unknown): ResultStatus | undefined {
 }
 
 function taskResult(
-  envelope: JsonObject, data: JsonObject, ref: TaskRef, status: ResultStatus | undefined, client: AdpClient
+  envelope: JsonObject, data: JsonObject, ref: TaskRef, status: ResultStatus | undefined, client: AdpClient, publicReason?: unknown
 ): JsonObject {
   if (!status) {
     return {
@@ -620,24 +625,24 @@ function taskResult(
       next_steps: [taskStep(ref, "使用原任务引用查询最新状态。")]
     };
   }
-  const result = { ...documentResult(envelope, data, status, client), task_ref: ref };
+  const result = { ...documentResult(envelope, data, status, client, publicReason), task_ref: ref };
   if (status === "pending") {
     return { ...result, next_steps: [taskStep(ref, "稍后查询原任务。")] };
   }
   return result;
 }
 
-function documentResult(envelope: JsonObject, data: JsonObject, status: ResultStatus, client: AdpClient): JsonObject {
-  const result = {
-    status, data, ...usageFields(envelope),
+function documentResult(envelope: JsonObject, data: JsonObject, status: ResultStatus, client: AdpClient, publicReason?: unknown): JsonObject {
+  const result = { status, ...usageFields(envelope) };
+  if (status === "failed") {
+    const { message, error, ...resultData } = data;
+    const details = errorDetails(client.taskFailure(envelope, publicReason));
+    return { ...result, data: resultData, error: details, next_steps: [errorStep(details)] };
+  }
+  return {
+    ...result, data,
     ...(typeof envelope.message === "string" && envelope.message ? { message: envelope.message } : {})
   };
-  if (status === "failed") {
-    const error = client.taskFailure(envelope) ?? new AdpApiError("任务未成功完成。", { code: "TASK_FAILED", retryable: false });
-    const details = errorDetails(error);
-    return { ...result, error: details, next_steps: [errorStep(details)] };
-  }
-  return result;
 }
 
 function taskStep(ref: TaskRef, message: string, queryError?: JsonObject): JsonObject {

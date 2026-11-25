@@ -861,6 +861,7 @@ test("default parsing returns the synchronous OpenAPI result and async extractio
 test("domestic preset preserves the per-request invoice verification override", async t => {
   const { client, calls } = await connect(t, ({ path }) => {
     if (path === `${catalogDetail}?app_id=${domesticBill}`) return presetDetail(domesticBill);
+    if (path === `${catalogDetail}?app_id=${overseasFast}`) return presetDetail(overseasFast);
     assert.equal(path, `${documentPrefix}/extract/create/task`);
     return ok({ task_id: "domestic-extract" });
   }, "test-key", { API_SOURCE: "npm-mcp", ADP_REGION: "cn" });
@@ -877,8 +878,38 @@ test("domestic preset preserves the per-request invoice verification override", 
   assert.equal(Object.hasOwn(calls.at(-1).body, "with_rec_result"), false);
   const unrelated = await call(client, "extract_document", { ...input, app_id: overseasFast, enable_invoice_verify: true });
   assert.equal(unrelated.isError, true);
-  assert.deepEqual(calls.map(c => c.method), ["GET", "POST", "GET", "POST", "GET", "POST"]);
+  assert.deepEqual(calls.map(c => c.method), ["GET", "POST", "GET", "POST", "GET", "POST", "GET"]);
   assert.ok(calls.every(item => item.source === "npm-mcp"));
+});
+
+test("invoice verification checks account app capability before submitting true or false overrides", async t => {
+  let detail;
+  const app_id = "account-domestic";
+  const { client, calls } = await connect(t, ({ method, path, body }) => {
+    if (method === "GET") {
+      assert.equal(path, `${catalogDetail}?app_id=${app_id}`);
+      return ok(detail);
+    }
+    assert.equal(path, `${documentPrefix}/extract/create/task`);
+    assert.equal(body.app_id, app_id);
+    return ok({ task_id: "accepted" });
+  }, "test-key", { ADP_REGION: "cn" });
+  for (const enable_invoice_verify of [true, false]) {
+    for (const [candidate, accepted] of [
+      [{ app_id, source: "custom", engine_type: "extract", ai_function: 1410 }, true],
+      [{ app_id, source: "custom", engine_type: "extract", ai_function: 1425 }, false],
+      [{ app_id, source: "custom", engine_type: "parse", ai_function: 1410 }, false],
+      [{ app_id: "another-app", source: "custom", engine_type: "extract", ai_function: 1410 }, false],
+      [{ app_id, source: "custom", engine_type: "extract" }, false],
+    ]) {
+      detail = candidate;
+      const before = calls.length;
+      const result = await call(client, "extract_document", { app_id, file_url: fileUrl, enable_invoice_verify, wait: false });
+      assert.equal(result.isError === true, !accepted);
+      assert.deepEqual(calls.slice(before).map(item => item.method), accepted ? ["GET", "POST"] : ["GET"]);
+      if (accepted) assert.equal(calls.at(-1).body.enable_invoice_verify, enable_invoice_verify);
+    }
+  }
 });
 
 test("preset extraction submits only after the tenant catalog confirms the requested extraction preset", async t => {
@@ -1429,6 +1460,67 @@ test("rate limits on native processing and task queries preserve Retry-After wit
   assert.deepEqual(calls.map(({ method, path }) => [method, path]), [
     ["POST", documentPrefix + "/recognize"], ["GET", documentPrefix + "/recognize/query/task/" + ref.id]
   ]);
+});
+
+test("sync extraction and task queries preserve the upstream error message verbatim", async t => {
+  const reason = "  BadRequestError: The provided messages input is invalid.\nUnexpected item type in content.\r\n";
+  const privateMessage = "private diagnostic from provider";
+  const ref = { kind: "extract", id: "extract-1" };
+  const { client } = await connect(t, ({ path }) => {
+    assert.ok([documentPrefix + "/extract", documentPrefix + "/extract/query/task/" + ref.id].includes(path));
+    return {
+      ...ok({ task_id: ref.id, response_type: "extract", status: 5, message: privateMessage, error: { message: privateMessage } }),
+      message: privateMessage, tips: reason, usage: recordedUsage
+    };
+  });
+  for (const [tool, args] of [["extract_document", { app_id: "custom", file_url: fileUrl }], ["get_task", { task_ref: ref }]]) {
+    const result = await call(client, tool, args);
+    assert.equal(result.isError, true);
+    assert.deepEqual(result.structuredContent.error, { code: "TASK_FAILED", retryable: false, message: reason });
+    assert.deepEqual(result.structuredContent.data, { task_id: ref.id, response_type: "extract", status: 5 });
+    assert.deepEqual(result.structuredContent.task_ref, tool === "get_task" ? ref : undefined);
+    assert.deepEqual(result.structuredContent.usage, recordedUsage);
+    assert.equal(JSON.parse(result.content[0].text).error.message, reason);
+    assert.ok(!JSON.stringify(result).includes(privateMessage));
+  }
+});
+
+test("task failures retain credit handling and use the localized fallback without a public reason", async t => {
+  const { client } = await connect(t, ({ path }) => {
+    const id = path.split("/").at(-1);
+    const data = { task_id: id, status: 5, message: id === "credit" ? "Insufficient credits" : "private diagnostic" };
+    if (id !== "missing-type") data.response_type = "extract";
+    const envelope = ok(data);
+    if (id === "empty") envelope.tips = " ";
+    if (id === "object") envelope.tips = { diagnostic: "private diagnostic" };
+    if (id === "credit") envelope.tips = "This request could not run.";
+    if (id === "english") envelope.tips = "The extraction service could not process this type of document.";
+    if (id === "missing-type" || id === "other-route") envelope.tips = "private diagnostic";
+    return envelope;
+  }, "test-key", { ADP_ACCEPT_LANGUAGE: "en" });
+  for (const id of ["legacy", "empty", "object", "missing-type", "other-route", "credit", "english"]) {
+    const result = await call(client, "get_task", { task_ref: { kind: id === "other-route" ? "parse" : "extract", id } });
+    const error = result.structuredContent.error;
+    assert.equal(error.code, id === "credit" ? "INSUFFICIENT_CREDITS" : "TASK_FAILED");
+    if (id === "credit") assert.match(error.message, /Insufficient credits/);
+    else if (id === "english") assert.equal(error.message, "The extraction service could not process this type of document.");
+    else assert.equal(error.message, "The task did not complete successfully.");
+    assert.ok(!JSON.stringify(result).includes("private diagnostic"));
+  }
+});
+
+test("async extraction submission keeps its task reference without exposing unreviewed submission tips", async t => {
+  const { client, calls } = await connect(t, ({ path }) => {
+    assert.equal(path, documentPrefix + "/extract/create/task");
+    return { ...ok({ response_type: "extract", task_id: "new-extract", status: 5 }), tips: "private submission diagnostic" };
+  });
+  const result = await call(client, "extract_document", { app_id: "custom", file_url: fileUrl, wait: false });
+  assert.equal(result.isError, true);
+  assert.equal(result.structuredContent.error.message, "任务未成功完成。");
+  assert.equal(result.structuredContent.error.code, "TASK_FAILED");
+  assert.deepEqual(result.structuredContent.task_ref, { kind: "extract", id: "new-extract" });
+  assert.ok(!JSON.stringify(result).includes("private submission diagnostic"));
+  assert.equal(calls.length, 1);
 });
 
 test("a synchronous business failure or nonterminal receipt is never turned into an async task", async t => {

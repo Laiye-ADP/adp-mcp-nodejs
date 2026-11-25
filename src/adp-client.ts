@@ -346,8 +346,12 @@ export class AdpClient {
     return { file, name: basename(path) };
   }
 
-  taskFailure(result: JsonObject): AdpApiError | undefined {
-    return hasInsufficientCredits(result) ? this.#creditError(this.#getConnection().origin) : undefined;
+  taskFailure(result: JsonObject, publicReason?: unknown): AdpApiError {
+    if (hasInsufficientCredits(result)) return this.#creditError(this.#getConnection().origin);
+    const message = typeof publicReason === "string" && publicReason.trim()
+      ? publicReason
+      : this.#text("任务未成功完成。", "The task did not complete successfully.");
+    return new AdpApiError(message, { code: "TASK_FAILED", retryable: false });
   }
 
   #path(service: string, suffix: string): string {
