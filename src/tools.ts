@@ -1,14 +1,16 @@
 import { readFileSync } from "node:fs";
+import { basename } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { Tool } from "@modelcontextprotocol/sdk/types.js";
 import { Ajv2020 } from "ajv/dist/2020.js";
 import { fullFormats } from "ajv-formats/dist/formats.js";
 import { AdpApiError, type AdpClient, type JsonObject } from "./adp-client.js";
 import { businessGuide } from "./business-guides.js";
+import { analyticsParametersEnabled, businessInputSchema, publishedTools } from "./analytics.js";
 
 type TaskKind = "parse" | "extract" | "classify";
 type TaskRef = { kind: TaskKind; id: string };
 type ResultStatus = "pending" | "succeeded" | "failed" | "cancelled";
-type ScheduleRequest = <T>(request: () => Promise<T>) => Promise<T>;
 
 const cnCatalog: Tool[] = JSON.parse(readFileSync(new URL("../catalog/tools.zh-CN.json", import.meta.url), "utf8"));
 const inputRules: Record<string, Partial<Tool["inputSchema"]>> =
@@ -37,13 +39,14 @@ const englishTools = {
   global: translateToolText(globalCatalog) as Tool[]
 };
 
-export function getTools(region: "cn" | "global", language: string): Tool[] {
-  return /^en(?:-|$)/i.test(language) ? englishTools[region] : tools[region];
+export function getTools(region: "cn" | "global", language: string, analyticsEnabled = analyticsParametersEnabled()): Tool[] {
+  return publishedTools(/^en(?:-|$)/i.test(language) ? englishTools[region] : tools[region], analyticsEnabled);
 }
 const validator = new Ajv2020({ strict: false, formats: fullFormats });
 
 // Cross-field rules are kept out of the advertised schema so form clients only render real parameters.
 export function validationInputSchema({ name, inputSchema }: Pick<Tool, "name" | "inputSchema">): Tool["inputSchema"] {
+  inputSchema = businessInputSchema(name, inputSchema);
   if (name === "get_adp_guide") {
     return { ...inputSchema, properties: { language: { enum: ["zh", "zh-CN", "en", "en-US"] } } };
   }
@@ -52,7 +55,7 @@ export function validationInputSchema({ name, inputSchema }: Pick<Tool, "name" |
   return {
     ...inputSchema, ...rules,
     properties: { ...inputSchema.properties, ...rules.properties },
-    ...(["create_extraction_app", "update_extraction_app"].includes(name) ? { $defs: inputRules.$defs } : {})
+    ...(["create_app", "update_app"].includes(name) ? { $defs: inputRules.$defs } : {})
   };
 }
 
@@ -65,7 +68,6 @@ const validators = { cn: compileCatalog(tools.cn), global: compileCatalog(tools.
 const parseAppId = "ootb_k7m2x9p4v1n8w3q6r5t0y2b4";
 const domesticBillsAppId = "ootb_v9x2y5z8a1b4c7d0e3f6h9j1k4m7";
 const defaultWaitSeconds = 60;
-const batchConcurrency = 3;
 const taskActions = {
   parse: { route: "/v1/app/doc/recognize", idKey: "task_id" },
   extract: { route: "/v1/app/doc/extract", idKey: "task_id" },
@@ -81,8 +83,8 @@ const invoiceInputFields = ["fpNumber", "fpDate", "fpCode", "fpAmount", "fpNoTax
 
 const inputRepairMessages = {
   missing_file_source: {
-    zh: "缺少待处理文件。请通过 file_url 或 file_base64 提供一份文件。",
-    en: "A document is required. Provide one file using file_url or file_base64."
+    zh: "缺少待处理文件。请通过 file_url 提供一份文件的下载地址。",
+    en: "A document is required. Provide its download URL in file_url."
   },
   incomplete_task_ref: {
     zh: "任务引用不完整。请原样传入提交任务时返回的 task_ref（包含 kind 和 id），或改为同时传入 task_type 和 task_id。",
@@ -109,7 +111,7 @@ function inputRepairReason(name: string, args: JsonObject): keyof typeof inputRe
   const missingFieldsFile = fieldExtraction && (!("file" in args) || isEmptyObject(args.file));
   const requiresFile = name === "parse_document" || name === "classify_document"
     || (name === "extract_document" && "app_id" in args) || missingFieldsFile;
-  if (requiresFile && !("file_url" in args) && !("file_base64" in args)) {
+  if (requiresFile && !("file_url" in args)) {
     return "missing_file_source";
   }
 }
@@ -134,7 +136,7 @@ export async function callTool(name: string, args: JsonObject, client: AdpClient
   const result = await runTool(name, args, client, version, signal);
   if (!entry.output(result)) {
     const msg = "ADP 返回的数据不符合 " + name + " 的结果契约。";
-    if (["create_extraction_app", "update_extraction_app", "delete_extraction_app"].includes(name)) throw unknownReceipt(msg);
+    if (["create_app", "update_app", "delete_app"].includes(name)) throw unknownReceipt(msg);
     throw new AdpApiError(msg, { code: "INVALID_RESPONSE", retryable: false });
   }
   return result;
@@ -151,17 +153,17 @@ function normalizeToolInput(name: string, args: JsonObject): JsonObject {
     const { task_ref, ...identifiers } = args;
     return identifiers;
   }
-  if (name !== "create_extraction_app" && name !== "update_extraction_app") return args;
-  if (name === "create_extraction_app") {
+  if (name !== "create_app" && name !== "update_app") return args;
+  if (name === "create_app") {
     args = { ...args };
     // Some form clients submit empty arrays for the unselected application type.
-    for (const key of args.ai_function === 1426 ? ["extract_fields", "app_label"] : ["classify_types"]) {
+    for (const key of args.engine_type === "classify" ? ["extract_fields", "app_label"] : ["classify_types"]) {
       const value = args[key];
       if (Array.isArray(value) && value.length === 0) delete args[key];
     }
   }
   if (!Array.isArray(args.extract_fields)) return args;
-  if (name === "update_extraction_app" && !args.extract_fields.length && args.config_version === undefined
+  if (name === "update_app" && !args.extract_fields.length && args.config_version === undefined
       && (args.app_name !== undefined || args.description !== undefined)) {
     const { extract_fields, ...metadata } = args;
     return metadata;
@@ -220,12 +222,9 @@ function normalizeExtractionInput(args: JsonObject): JsonObject {
 
   // An older client can still send the native direct-fast file object. Keeping
   // both shapes in a mixed request lets validation reject the ambiguous source.
-  if (!("file" in input) && ("file_url" in input || "file_base64" in input)) {
-    const file: JsonObject = {};
-    if ("file_url" in input) file.url = input.file_url;
-    if ("file_base64" in input) file.base64 = input.file_base64;
+  if (!("file" in input) && "file_url" in input) {
+    const file = { url: input.file_url };
     delete input.file_url;
-    delete input.file_base64;
     input.file = file;
   }
   return input;
@@ -275,33 +274,38 @@ async function runTool(name: string, args: JsonObject, client: AdpClient, versio
       const filters = { engine_type: "document", ...args };
       const query = Object.fromEntries(Object.entries(filters).map(([key, value]) => [key, String(value)]));
       const data = requireData(await client.request(client.documentPath("/v1/app-catalog"), { query, signal }));
-      return { status: "succeeded", data };
+      return { status: "succeeded", data: { ...data,
+        list: Array.isArray(data.list) ? data.list.map(app => isObject(app) ? publicApp(app) : app) : data.list } };
     }
     case "get_app":
-      return { status: "succeeded", data: await getAppDetail(client, args.app_id as string, signal, args.config_version as string | undefined) };
-    case "create_extraction_app": {
-      const { timeout_seconds, ai_function = 1425, ...config } = args;
-      if (ai_function === 1426) config.classify_types = classificationCategories(config.classify_types as JsonObject[]);
+      return { status: "succeeded", data: publicApp(await getAppDetail(client, args.app_id as string, signal,
+        args.config_version as string | undefined)) };
+    case "create_app": {
+      const { timeout_seconds, engine_type = "extract", ...config } = args;
+      const ai_function = engine_type === "classify" ? 1426 : 1425;
+      if (engine_type === "classify") config.classify_types = classificationCategories(config.classify_types as JsonObject[]);
       const data = mutationData(await client.request(client.documentPath("/v1/app-manage/create"), {
         method: "POST", body: { ...config, ai_function }, timeoutMs: Number(timeout_seconds ?? 300) * 1000, signal
       }));
       const receivedType = data.ai_function === undefined ? 1425 : data.ai_function;
-      if (receivedType !== ai_function) throw unknownReceipt("应用创建回执中的类型与请求不一致。");
-      return data;
+      if (receivedType !== ai_function || (data.engine_type !== undefined && data.engine_type !== engine_type)) {
+        throw unknownReceipt("应用创建回执中的类型与请求不一致。");
+      }
+      return { ...publicApp(data), engine_type };
     }
-    case "update_extraction_app":
-    case "delete_extraction_app": {
-      const operation = name === "update_extraction_app" ? "update" : "delete";
+    case "update_app":
+    case "delete_app": {
+      const operation = name === "update_app" ? "update" : "delete";
       const data = mutationData(await client.request(client.documentPath("/v1/app-catalog/extraction/" + operation), {
         method: "POST", body: args, signal
       }));
-      if (name === "update_extraction_app" && data.app_id !== args.app_id) {
+      if (name === "update_app" && data.app_id !== args.app_id) {
         throw unknownReceipt("应用更新回执的 ID 与请求不一致，请检查目标应用的配置。");
       }
-      if (name === "delete_extraction_app" && data.success === false) {
+      if (name === "delete_app" && data.success === false) {
         throw new AdpApiError("应用删除失败。", { code: "DELETE_FAILED", retryable: false });
       }
-      return data;
+      return name === "update_app" ? { ...publicApp(data), engine_type: "extract" } : publicApp(data);
     }
     case "get_credits": {
       const receipt = await client.request(client.documentPath("/v1/user/payment"), { signal, rawResponse: true });
@@ -324,7 +328,7 @@ async function runTool(name: string, args: JsonObject, client: AdpClient, versio
         const fields = (args.fields as { name: string; prompt?: string | null }[]).map(field => ({ ...field, name: field.name.trim() }));
         if (new Set(fields.map(({ name }) => name.toLowerCase())).size !== fields.length) throw new Error("字段名称必须唯一。");
         const file = args.file as JsonObject;
-        return extractDirect(typeof file.url === "string" ? { url: normalizeFileUrl(file.url) } : file, fields, client, signal);
+        return extractDirect({ url: normalizeFileUrl(file.url as string) }, fields, client, signal);
       }
       const appId = (args.app_id as string).trim();
       if (appId.startsWith("ootb_") || args.enable_invoice_verify !== undefined) {
@@ -362,12 +366,17 @@ async function getAppDetail(client: AdpClient, appId: string, signal?: AbortSign
   return data;
 }
 
+function publicApp(app: JsonObject): JsonObject {
+  const { ai_function, ...visible } = app;
+  return visible;
+}
+
 function selectOptions(args: JsonObject, keys: string[]): JsonObject {
   return Object.fromEntries(keys.filter(key => args[key] !== undefined).map(key => [key, args[key]]));
 }
 
 function documentSource(args: JsonObject, allowJobId = false): JsonObject {
-  const file = selectOptions(args, ["file_url", "file_base64", "file_name"]);
+  const file = selectOptions(args, ["file_url", "file_name"]);
   if (typeof file.file_url === "string" && !(allowJobId && /^jobid:\/\/[a-f0-9]{32}$/i.test(file.file_url))) {
     file.file_url = normalizeFileUrl(file.file_url);
   }
@@ -425,22 +434,6 @@ function normalizeFileUrl(value: string): string {
   throw new Error("文件必须使用可访问的 HTTP(S) URL。本地文件请先用 upload_file 上传。");
 }
 
-function limitBatchRequests(): ScheduleRequest {
-  let active = 0;
-  const queue: (() => void)[] = [];
-  return async (request) => {
-    if (active < batchConcurrency) active++;
-    else await new Promise<void>((resolve) => queue.push(resolve));
-    try {
-      return await request();
-    } finally {
-      const next = queue.shift();
-      if (next) next();
-      else active--;
-    }
-  };
-}
-
 async function uploadFiles(args: JsonObject, client: AdpClient, signal?: AbortSignal): Promise<JsonObject> {
   async function upload(filePath: string): Promise<JsonObject> {
     try {
@@ -458,14 +451,20 @@ async function uploadFiles(args: JsonObject, client: AdpClient, signal?: AbortSi
     }
   }
 
-  const schedule = limitBatchRequests();
-  const results = await Promise.all((args.files as { file_path: string }[]).map(({ file_path }, index) =>
-    schedule(async () => {
-      signal?.throwIfAborted();
-      return { index, ...await upload(file_path) };
-    })
-  ));
+  const results = await Promise.all((args.files as { file_path: string }[]).map(async ({ file_path }, index) => {
+    signal?.throwIfAborted();
+    const file_name = uploadFileName(file_path);
+    return { index, file_path, file_name, ...await upload(file_path) };
+  }));
   return batchResult(results);
+}
+
+function uploadFileName(filePath: string): string {
+  try {
+    return basename(/^file:/i.test(filePath) ? fileURLToPath(filePath) : filePath);
+  } catch {
+    return "";
+  }
 }
 
 function batchResult(files: JsonObject[]): JsonObject {

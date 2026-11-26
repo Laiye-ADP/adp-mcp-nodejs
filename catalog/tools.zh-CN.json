@@ -38,14 +38,13 @@
   {
     "name": "upload_file",
     "title": "上传文件",
-    "description": "将文件上传到 ADP，返回可用于解析、抽取或分类的下载地址。已有可下载的 HTTP(S) 文件地址时，可跳过上传。",
+    "description": "将本机文件上传到 ADP，返回可用于解析、抽取或分类的下载地址。多份文件应在一次调用中全部放入 files，工具会并行上传，无需逐份调用并等待。每项结果都包含原始 file_path、file_name 和输入索引 index，用于对应原文件。上传成功后，用该项 data.download_url 继续处理。部分失败时，保留成功项，按原文件定位失败项；若 error.acceptance_unknown=true，先核实上传状态，避免盲目重试或重新提交整批文件。已有可下载的 HTTP(S) 文件地址时，可跳过上传。",
     "inputSchema": {
       "type": "object",
       "properties": {
         "files": {
           "type": "array",
           "minItems": 1,
-          "maxItems": 20,
           "items": {
             "type": "object",
             "properties": {
@@ -64,7 +63,7 @@
             "title": "文件上传项",
             "description": "一项对应一个要上传的文件。"
           },
-          "description": "填写 1 至 20 个本机文件，上传后按项返回各自的下载地址。",
+          "description": "填写本次要上传的全部本机文件，每个文件一项。工具并行上传，按 index、原始 file_path 和 file_name 返回各项结果。复用成功项的 data.download_url，按原文件定位失败项；状态未知时先核实，不要重新上传成功文件。",
           "title": "上传文件列表"
         }
       },
@@ -102,6 +101,17 @@
                     "type": "integer",
                     "minimum": 0
                   },
+                  "file_path": {
+                    "type": "string",
+                    "minLength": 1,
+                    "title": "原始文件路径",
+                    "description": "原样返回该项输入的 file_path，成功和失败项均包含。用它区分不同目录中的同名文件。"
+                  },
+                  "file_name": {
+                    "type": "string",
+                    "title": "原始文件名",
+                    "description": "从输入路径取得的本机文件名，file:/// 地址会先解码。无法取得文件名时返回空字符串，仍可用 file_path 和 index 定位原文件。"
+                  },
                   "status": {
                     "enum": [
                       "succeeded",
@@ -130,6 +140,8 @@
                 },
                 "required": [
                   "index",
+                  "file_path",
+                  "file_name",
                   "status"
                 ],
                 "if": {
@@ -191,20 +203,12 @@
           "type": "string",
           "format": "uri",
           "pattern": "^https?://[^\\s]+$",
-          "description": "填写一份文档可下载的 HTTP(S) 地址，也可使用上传返回的 download_url。使用 file_base64 时省略此项。",
+          "description": "填写一份文档可下载的 HTTP(S) 地址，也可使用上传返回的 download_url。",
           "title": "文件下载地址"
-        },
-        "file_base64": {
-          "type": "string",
-          "minLength": 1,
-          "pattern": "\\S",
-          "contentEncoding": "base64",
-          "description": "使用 Base64 提供一份文档时填写此项；已填写 file_url 时省略。",
-          "title": "文件内容（Base64）"
         },
         "file_name": {
           "type": "string",
-          "description": "可选文件名。使用 Base64 或无法从地址判断文件名时，建议提供含扩展名的名称。",
+          "description": "可选文件名。无法从地址判断文件名时，建议提供含扩展名的名称。",
           "title": "文件名"
         },
         "recognize_mode": {
@@ -263,10 +267,23 @@
           "default": 60,
           "description": "wait=true 的同步请求时限，默认 60 秒。超时返回错误，处理结果可能未知。wait=false 时忽略。",
           "title": "结果等待时间（秒）"
+        },
+        "context": {
+          "type": "string",
+          "title": "业务意图",
+          "description": "用一句话概括本次文档处理的业务目的，最多 256 个字符。只提供简短业务意图，不要包含用户原话、文档内容、下载地址或个人信息。"
+        },
+        "llm_model": {
+          "type": "string",
+          "title": "调用模型",
+          "description": "明确知道当前调用模型时填写模型标识，最多 128 个字符。不确定时省略或填写 unknown；不要把客户端名称当作模型名称。"
         }
       },
       "additionalProperties": false,
-      "description": "每次解析一份文档。在 file_url 与 file_base64 中选填一项。"
+      "description": "每次解析一份文档，用 file_url 提供下载地址。",
+      "required": [
+        "file_url"
+      ]
     },
     "annotations": {
       "readOnlyHint": false,
@@ -498,7 +515,7 @@
   {
     "name": "extract_document",
     "title": "文档抽取",
-    "description": "从一份文档提取字段值，例如身份证上的姓名、合同中的付款期限。根据用户是否指定抽取应用、字段或文档类型选择用法。\n\n**指定了抽取应用。** 已知 `app_id` 时，直接传入该 ID 和文件。用户点名团队应用时，调用 `list_apps`，传 `engine_type=extract`、`source=custom` 和 `app_name`。只给应用名且来源不明时，按名称和业务类型搜索两种来源。同名结果无法区分时请用户选择。用户同时点名字段时，按应用规则抽取，只展示指定字段。\n\n**一次性抽取。** 用户明确本次要哪些字段、且未指定应用时，直接传文件和 `fields`（1–20 个），同步返回字段值，无需查询应用目录。例如“这次只要合同的付款期限和违约金”。\n\n**只给文档类型。** 例如“帮我抽取这张身份证”，用 `list_apps` 传 `engine_type=extract`、`source=preset` 和 `document_type`，再用返回的 `app_id` 抽取。若没有匹配预置，可按文档内容和用途选定本次字段。仍不明确时询问用户。\n\n抽取完成后按实际返回的字段作答，缺失的字段如实说明。用户还要求整页原文、Markdown 或版面时，再调用 `parse_document`。\n\n**专业抽取（自定义抽取应用）。** 用户对准确率、处理速度、跨版式一致性有明确要求，或需长期复用规则时，可推荐自定义抽取应用。用户决定创建后，用 `create_extraction_app` 保存字段类型、取值规则和输出格式，再用返回的 `app_id` 在代表性样本上验证效果和耗时。\n\n按 `app_id` 抽取默认同步。需要后台处理时，传 `app_id` 和 `wait=false`，再用返回的 `task_ref` 调用 `get_task`。一次性 `fields` 仅支持同步。如果用户既限定一次性字段、又要求后台任务，请说明可选同步字段抽取或允许使用抽取应用后异步处理，请用户选择。",
+    "description": "从一份文档提取字段值，例如身份证上的姓名、合同中的付款期限。根据用户是否指定抽取应用、字段或文档类型选择用法。\n\n**指定了抽取应用。** 已知 `app_id` 时，直接传入该 ID 和文件。用户点名团队应用时，调用 `list_apps`，传 `engine_type=extract`、`source=custom` 和 `app_name`。只给应用名且来源不明时，按名称和业务类型搜索两种来源。同名结果无法区分时请用户选择。用户同时点名字段时，按应用规则抽取，只展示指定字段。\n\n**一次性抽取。** 用户明确本次要哪些字段、且未指定应用时，直接传文件和 `fields`（1–20 个），同步返回字段值，无需查询应用目录。例如“这次只要合同的付款期限和违约金”。\n\n**只给文档类型。** 例如“帮我抽取这张身份证”，用 `list_apps` 传 `engine_type=extract`、`source=preset` 和 `document_type`，再用返回的 `app_id` 抽取。若没有匹配预置，可按文档内容和用途选定本次字段。仍不明确时询问用户。\n\n抽取完成后按实际返回的字段作答，缺失的字段如实说明。用户还要求整页原文、Markdown 或版面时，再调用 `parse_document`。\n\n**专业抽取（自定义抽取应用）。** 用户对准确率、处理速度、跨版式一致性有明确要求，或需长期复用规则时，可推荐自定义抽取应用。用户决定创建后，用 `create_app` 保存字段类型、取值规则和输出格式，再用返回的 `app_id` 在代表性样本上验证效果和耗时。\n\n按 `app_id` 抽取默认同步。需要后台处理时，传 `app_id` 和 `wait=false`，再用返回的 `task_ref` 调用 `get_task`。一次性 `fields` 仅支持同步。如果用户既限定一次性字段、又要求后台任务，请说明可选同步字段抽取或允许使用抽取应用后异步处理，请用户选择。",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -516,17 +533,9 @@
           "description": "提供一份文档的 HTTP(S) 下载地址。仅标准版自定义抽取应用可改传 jobid://<32 位十六进制解析任务 ID>，复用同区域、同租户、同一 API 账号下已成功且仍可读取的完整逐页解析结果（异步任务，Markdown 和 Excel 除外）。复用时沿用原任务的页范围，文件来源只填 file_url。",
           "title": "文件下载地址"
         },
-        "file_base64": {
-          "type": "string",
-          "minLength": 1,
-          "pattern": "\\S",
-          "contentEncoding": "base64",
-          "description": "用 Base64 提供一份文件。按 fields 抽取时，file_url 和 file_base64 必须二选一。按 app_id 抽取也建议只传一种来源；若同时传入有效 HTTP(S) 地址和 Base64，使用 Base64。",
-          "title": "文件内容（Base64）"
-        },
         "file_name": {
           "type": "string",
-          "description": "按 app_id 抽取时可填写原文件名并保留扩展名。使用 Base64 或下载地址未显示文件类型时建议填写，尤其是 Excel 和 Markdown。按 fields 抽取时省略。",
+          "description": "按 app_id 抽取时可填写原文件名并保留扩展名。下载地址未显示文件类型时建议填写，尤其是 Excel 和 Markdown。按 fields 抽取时省略。",
           "title": "文件名"
         },
         "fields": {
@@ -612,10 +621,20 @@
           "maximum": 900,
           "description": "按 app_id 抽取时，wait=true 的同步请求时限，默认 60 秒。超时返回错误，处理结果可能未知。wait=false 时忽略。",
           "title": "结果等待时间（秒）"
+        },
+        "context": {
+          "type": "string",
+          "title": "业务意图",
+          "description": "用一句话概括本次文档处理的业务目的，最多 256 个字符。只提供简短业务意图，不要包含用户原话、文档内容、下载地址或个人信息。"
+        },
+        "llm_model": {
+          "type": "string",
+          "title": "调用模型",
+          "description": "明确知道当前调用模型时填写模型标识，最多 128 个字符。不确定时省略或填写 unknown；不要把客户端名称当作模型名称。"
         }
       },
       "additionalProperties": false,
-      "description": "每次抽取一份文档。选择一种文件来源，再选择一种抽取方式：app_id 使用已有规则，fields 指定本次字段。"
+      "description": "每次抽取一份文档。用 file_url 提供文件，再选择一种抽取方式：app_id 使用已有规则，fields 指定本次字段。"
     },
     "annotations": {
       "readOnlyHint": false,
@@ -874,7 +893,7 @@
   {
     "name": "classify_document",
     "title": "文档分类",
-    "description": "需要判断文件的文档类型（如发票、合同），或找出混合文件中每份材料所在的页面时，调用此工具。\n\n1. **选择分类应用**。使用当前账号创建、且包含所需类别的分类应用 `app_id`。如果当前连接的 `list_apps` 支持分类筛选，可按 `engine_type=classify` 查找。没有合适的应用时，用 `create_extraction_app` 传入 `ai_function=1426`、应用名称和 `classify_types` 创建分类应用，再使用返回的 `app_id`。\n2. **提交文件**。传入 `app_id` 和一份文件，例如用 `file_url` 提供下载地址。省略 `pages` 时分类整份文件，传 `pages=[2, 4]` 时只分类原文件第 2、4 页。多份文件逐份调用，按文件汇总。默认同步返回，需要稍后取结果时传 `wait=false`，再用返回的 `task_ref` 调用 `get_task`。\n3. **解读结果**。`data.segments` 按材料列出文档类型和原始页码，`data.unclassified_pages` 列出本次未能归类的页码。用户要定位混合材料时，按材料报告即可。用户要整份文件的单一文档类型时，应分类全部页面。若所有页面均归入同一类别，报告该类别。若命中多个类别或有未分类页，列明相应页码，并将整份文件的文档类型标为待确认。",
+    "description": "需要判断文件的文档类型（如发票、合同），或找出混合文件中每份材料所在的页面时，调用此工具。\n\n1. **选择分类应用**。使用当前账号创建、且包含所需类别的分类应用 `app_id`。如果当前连接的 `list_apps` 支持分类筛选，可按 `engine_type=classify` 查找。没有合适的应用时，用 `create_app` 传入 `engine_type=classify`、应用名称和 `classify_types` 创建分类应用，再使用返回的 `app_id`。\n2. **提交文件**。传入 `app_id` 和一份文件，例如用 `file_url` 提供下载地址。省略 `pages` 时分类整份文件，传 `pages=[2, 4]` 时只分类原文件第 2、4 页。多份文件逐份调用，按文件汇总。默认同步返回，需要稍后取结果时传 `wait=false`，再用返回的 `task_ref` 调用 `get_task`。\n3. **解读结果**。`data.segments` 按材料列出文档类型和原始页码，`data.unclassified_pages` 列出本次未能归类的页码。用户要定位混合材料时，按材料报告即可。用户要整份文件的单一文档类型时，应分类全部页面。若所有页面均归入同一类别，报告该类别。若命中多个类别或有未分类页，列明相应页码，并将整份文件的文档类型标为待确认。",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -882,20 +901,12 @@
           "type": "string",
           "format": "uri",
           "pattern": "^https?://[^\\s]+$",
-          "description": "一份 PDF、JPEG 或 PNG 的 HTTP(S) 下载地址，可使用上传返回的 download_url。与 file_base64 二选一。",
+          "description": "一份 PDF、JPEG 或 PNG 的 HTTP(S) 下载地址，可使用上传返回的 download_url。",
           "title": "文件下载地址"
-        },
-        "file_base64": {
-          "type": "string",
-          "minLength": 1,
-          "pattern": "\\S",
-          "contentEncoding": "base64",
-          "description": "一份 PDF、JPEG 或 PNG 的 Base64 内容。与 file_url 二选一。",
-          "title": "文件内容（Base64）"
         },
         "file_name": {
           "type": "string",
-          "description": "可选文件名。使用 Base64 或无法从地址判断文件名时，建议提供含扩展名的名称。",
+          "description": "可选文件名。无法从地址判断文件名时，建议提供含扩展名的名称。",
           "title": "文件名"
         },
         "app_id": {
@@ -931,13 +942,24 @@
           "default": 60,
           "description": "wait=true 的同步请求时限，默认 60 秒。超时返回错误，处理结果可能未知。wait=false 时忽略。",
           "title": "结果等待时间（秒）"
+        },
+        "context": {
+          "type": "string",
+          "title": "业务意图",
+          "description": "用一句话概括本次文档处理的业务目的，最多 256 个字符。只提供简短业务意图，不要包含用户原话、文档内容、下载地址或个人信息。"
+        },
+        "llm_model": {
+          "type": "string",
+          "title": "调用模型",
+          "description": "明确知道当前调用模型时填写模型标识，最多 128 个字符。不确定时省略或填写 unknown；不要把客户端名称当作模型名称。"
         }
       },
       "additionalProperties": false,
       "required": [
-        "app_id"
+        "app_id",
+        "file_url"
       ],
-      "description": "传当前账号创建的分类应用 app_id，每次提供一份 PDF、JPEG 或 PNG，file_url 与 file_base64 二选一。单文件最大 100 MiB，PDF 原文件最多 260 页。"
+      "description": "传当前账号创建的分类应用 app_id，每次用 file_url 提供一份 PDF、JPEG 或 PNG。单文件最大 100 MiB，PDF 原文件最多 260 页。"
     },
     "annotations": {
       "readOnlyHint": false,
@@ -1205,21 +1227,21 @@
     }
   },
   {
-    "name": "create_extraction_app",
-    "title": "创建抽取或分类应用",
-    "description": "需要保存可复用的抽取或分类规则，或准备分类文件却没有合适的分类应用时，调用此工具。用 `app_name` 指定名称，可用 `description` 说明用途。\n\n1. **抽取应用**。反复从同类文档提取相同字段时，使用 `ai_function=1425`（默认）。用 `extract_fields` 定义字段名称、类型和抽取提示词，例如发票号码、开票日期和价税合计。创建后，将返回的 `app_id` 和文件传给 `extract_document`。只临时提取几个字段时，可直接用 `extract_document` 的 `fields`。\n2. **分类应用**。需要识别一份文件包含哪些材料、每份材料在原文件的哪几页时，使用 `ai_function=1426`。用 `classify_types` 定义要识别的类别，例如发票、合同和付款凭证。创建后，将返回的 `app_id` 和文件传给 `classify_document`。",
+    "name": "create_app",
+    "title": "创建应用",
+    "description": "需要保存可复用的抽取或分类规则，或准备分类文件却没有合适的分类应用时，调用此工具。用 `app_name` 指定名称，可用 `description` 说明用途。\n\n1. **抽取应用**。反复从同类文档提取相同字段时，使用 `engine_type=extract`（默认）。用 `extract_fields` 定义字段名称、类型和抽取提示词，例如发票号码、开票日期和价税合计。创建后，将返回的 `app_id` 和文件传给 `extract_document`。只临时提取几个字段时，可直接用 `extract_document` 的 `fields`。\n2. **分类应用**。需要识别一份文件包含哪些材料、每份材料在原文件的哪几页时，使用 `engine_type=classify`。用 `classify_types` 定义要识别的类别，例如发票、合同和付款凭证。创建后，将返回的 `app_id` 和文件传给 `classify_document`。",
     "inputSchema": {
       "type": "object",
       "properties": {
-        "ai_function": {
-          "type": "integer",
+        "engine_type": {
+          "type": "string",
           "enum": [
-            1425,
-            1426
+            "extract",
+            "classify"
           ],
-          "default": 1425,
+          "default": "extract",
           "title": "应用类型",
-          "description": "1425 创建抽取应用，保存 extract_fields 指定的字段。1426 创建分类应用，保存 classify_types 指定的类别。省略时使用 1425。"
+          "description": "extract 创建抽取应用，保存 extract_fields 指定的字段。classify 创建分类应用，保存 classify_types 指定的类别。省略时使用 extract。"
         },
         "app_name": {
           "type": "string",
@@ -1439,7 +1461,7 @@
             "title": "抽取字段",
             "description": "填写一个普通字段或表格字段的定义。表格的列在 sub_fields 中逐项填写。"
           },
-          "description": "创建 1425 抽取应用时必填。定义需复用的字段，最多 100 个普通字段和 10 个表格，每表最多 30 列。字段和列的 key 在整个配置内唯一。",
+          "description": "创建抽取应用（engine_type=extract）时必填。定义需复用的字段，最多 100 个普通字段和 10 个表格，每表最多 30 列。字段和列的 key 在整个配置内唯一。",
           "title": "应用抽取字段"
         },
         "classify_types": {
@@ -1447,7 +1469,7 @@
           "minItems": 1,
           "maxItems": 10,
           "title": "分类类别",
-          "description": "创建 1426 分类应用时必填。配置 1 至 10 种要识别的材料，例如发票、合同和付款凭证。",
+          "description": "创建分类应用（engine_type=classify）时必填。配置 1 至 10 种要识别的材料，例如发票、合同和付款凭证。",
           "items": {
             "type": "object",
             "additionalProperties": false,
@@ -1484,7 +1506,7 @@
         "app_code": {
           "type": "string",
           "maxLength": 64,
-          "description": "仅适用于 1425 抽取应用。用于关联外部业务系统的可选编码，最多 64 个字符。",
+          "description": "仅适用于抽取应用（engine_type=extract）。用于关联外部业务系统的可选编码，最多 64 个字符。",
           "title": "应用业务编码"
         },
         "app_label": {
@@ -1495,22 +1517,22 @@
             "title": "单个业务标签",
             "description": "填写一个用于归类应用的标签，例如“采购”。"
           },
-          "description": "仅适用于 1425 抽取应用。按业务为抽取应用设置标签，最多 5 个，例如“采购”或“财务”。",
+          "description": "仅适用于抽取应用（engine_type=extract）。按业务为抽取应用设置标签，最多 5 个，例如“采购”或“财务”。",
           "title": "应用标签"
         },
         "enable_highlight": {
           "type": "boolean",
-          "description": "仅适用于 1425 抽取应用。开启后，应用默认返回字段值在原文中的位置。",
+          "description": "仅适用于抽取应用（engine_type=extract）。开启后，应用默认返回字段值在原文中的位置。",
           "title": "返回字段的原文位置"
         },
         "enable_field_value_translation": {
           "type": "boolean",
-          "description": "仅适用于 1425 抽取应用。开启后，应用默认翻译提取的字段值。",
+          "description": "仅适用于抽取应用（engine_type=extract）。开启后，应用默认翻译提取的字段值。",
           "title": "翻译提取的字段值"
         },
         "enable_confidence": {
           "type": "boolean",
-          "description": "仅适用于 1425 抽取应用。开启后，应用默认返回字段置信度。",
+          "description": "仅适用于抽取应用（engine_type=extract）。开启后，应用默认返回字段置信度。",
           "title": "返回字段置信度"
         },
         "timeout_seconds": {
@@ -1526,7 +1548,7 @@
         "app_name"
       ],
       "additionalProperties": false,
-      "description": "填写应用名称。创建抽取应用时传 extract_fields，ai_function 默认为 1425。创建分类应用时传 ai_function=1426 和 classify_types。"
+      "description": "填写应用名称。创建抽取应用时传 extract_fields，engine_type 默认为 extract。创建分类应用时传 engine_type=classify 和 classify_types。"
     },
     "annotations": {
       "readOnlyHint": false,
@@ -1555,11 +1577,11 @@
               "minLength": 1,
               "pattern": "\\S"
             },
-            "ai_function": {
-              "type": "integer",
+            "engine_type": {
+              "type": "string",
               "enum": [
-                1425,
-                1426
+                "extract",
+                "classify"
               ]
             },
             "classify_types": {
@@ -1597,7 +1619,8 @@
           "required": [
             "app_id",
             "app_name",
-            "config_version"
+            "config_version",
+            "engine_type"
           ],
           "not": {
             "properties": {
@@ -1611,11 +1634,11 @@
           },
           "if": {
             "required": [
-              "ai_function"
+              "engine_type"
             ],
             "properties": {
-              "ai_function": {
-                "const": 1426
+              "engine_type": {
+                "const": "classify"
               }
             }
           },
@@ -1644,8 +1667,8 @@
     }
   },
   {
-    "name": "update_extraction_app",
-    "title": "更新抽取应用",
+    "name": "update_app",
+    "title": "更新应用",
     "description": "按 app_id 修改有权管理的自定义抽取应用。只改名称或说明时直接提交该项。增删或修改字段时，先用 get_app 取得完整的 extract_fields，改动目标字段，并连同要保留的字段一起提交。返回应用 ID 和更新结果。",
     "inputSchema": {
       "type": "object",
@@ -1911,6 +1934,10 @@
                 "string",
                 "null"
               ]
+            },
+            "engine_type": {
+              "type": "string",
+              "const": "extract"
             }
           },
           "required": [
@@ -1946,8 +1973,8 @@
     }
   },
   {
-    "name": "delete_extraction_app",
-    "title": "删除抽取应用",
+    "name": "delete_app",
+    "title": "删除应用",
     "description": "按 app_id 删除有权管理的自定义抽取应用及其关联配置和抽取数据，返回删除结果。仅在用户明确要求删除整个抽取应用时调用。只知道名称时用 list_apps 按 engine_type=extract 和 source=custom 查找，有重名时核实目标。要停止一次排队中的文档任务时用 cancel_task。",
     "inputSchema": {
       "type": "object",
@@ -2268,7 +2295,7 @@
               "items": {
                 "$ref": "#/$defs/field"
               },
-              "description": "仅在当前账号能读取自定义抽取应用的完整可编辑字段配置时返回。保留原字段 key、提示词、表格列归属和已配置的格式。普通字段省略 sub_fields。没有 key 的经典版字段省略 field_key。该列表可按 update_extraction_app 的 extract_fields 原样回传。"
+              "description": "仅在当前账号能读取自定义抽取应用的完整可编辑字段配置时返回。保留原字段 key、提示词、表格列归属和已配置的格式。普通字段省略 sub_fields。没有 key 的经典版字段省略 field_key。该列表可按 update_app 的 extract_fields 原样回传。"
             },
             "config_version": {
               "type": "string"
@@ -2812,6 +2839,16 @@
           "pattern": "\\S",
           "description": "可选的业务实例 ID，省略时由服务生成。",
           "title": "业务实例 ID"
+        },
+        "context": {
+          "type": "string",
+          "title": "业务意图",
+          "description": "用一句话概括本次文档处理的业务目的，最多 256 个字符。只提供简短业务意图，不要包含用户原话、文档内容、下载地址或个人信息。"
+        },
+        "llm_model": {
+          "type": "string",
+          "title": "调用模型",
+          "description": "明确知道当前调用模型时填写模型标识，最多 128 个字符。不确定时省略或填写 unknown；不要把客户端名称当作模型名称。"
         }
       },
       "required": [

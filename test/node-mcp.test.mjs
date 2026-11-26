@@ -4,13 +4,13 @@ import { createCipheriv, randomBytes, randomUUID } from "node:crypto";
 import { mkdir, mkdtemp, readFile, rm, rmdir, writeFile, unlink } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, parse } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { AdpClient } from "../dist/adp-client.js";
-import { callTool } from "../dist/tools.js";
+import { callTool, getTools } from "../dist/tools.js";
 
 const entry = fileURLToPath(new URL("../dist/index.js", import.meta.url));
 const documentPrefix = "/open/agentic_doc_processor/test-tenant/v1/app/doc";
@@ -30,8 +30,9 @@ const recordedUsage = {
 const ok = data => ({ code: "success", message: "", data });
 const presetDetail = app_id => ok({ app_id, source: "preset", engine_type: "extract" });
 
-async function connect(t, respond, apiKey = "test-key", environment = {}) {
+async function connect(t, respond, apiKey = "test-key", environment = {}, options = {}) {
   const calls = [];
+  const statistics = [];
   const api = createServer(async (request, response) => {
     try {
       const chunks = [];
@@ -47,8 +48,12 @@ async function connect(t, respond, apiKey = "test-key", environment = {}) {
         contentType,
         body: contentType?.startsWith("application/json") && raw ? JSON.parse(raw) : raw
       };
-      calls.push(call);
-      const payload = await respond(call, response);
+      const isStatistics = new URL(call.path, "http://fixture.invalid").pathname.endsWith("/v1/command/statistics");
+      if (isStatistics) statistics.push(call);
+      else calls.push(call);
+      const payload = isStatistics
+        ? await (options.statisticsResponder?.(call, response) ?? ok({}))
+        : await respond(call, response);
       response.setHeader("Content-Type", "application/json");
       response.end(JSON.stringify(payload));
     } catch (error) {
@@ -78,12 +83,169 @@ async function connect(t, respond, apiKey = "test-key", environment = {}) {
     await new Promise(resolve => api.close(resolve));
   });
   await client.connect(transport);
-  return { client, calls, baseUrl };
+  return { client, calls, statistics, baseUrl };
 }
 
 function call(client, name, args = {}) {
   return client.callTool({ name, arguments: args });
 }
+
+test("analytics parameters are limited to core tools and discovery returns isolated locale/profile copies", () => {
+  const core = new Set(["parse_document", "extract_document", "classify_document", "verify_invoice"]);
+  for (const region of ["cn", "global"]) {
+    for (const language of ["zh", "en-US"]) {
+      for (const tool of getTools(region, language, true)) {
+        for (const key of ["context", "llm_model"]) {
+          assert.equal(key in tool.inputSchema.properties, core.has(tool.name), tool.name + ":" + key);
+          if (core.has(tool.name)) {
+            assert.equal(tool.inputSchema.properties[key].type, "string");
+            assert.ok(!(tool.inputSchema.required ?? []).includes(key));
+            assert.ok(!("default" in tool.inputSchema.properties[key]));
+          }
+        }
+      }
+    }
+  }
+  const changed = getTools("cn", "zh", true);
+  changed.find(tool => tool.name === "parse_document").inputSchema.properties.context.description = "mutated";
+  for (const tool of getTools("cn", "en-US", false)) {
+    assert.ok(!("context" in tool.inputSchema.properties));
+    assert.ok(!("llm_model" in tool.inputSchema.properties));
+  }
+  assert.notEqual(getTools("cn", "zh", true).find(tool => tool.name === "parse_document")
+    .inputSchema.properties.context.description, "mutated");
+  assert.equal(getTools("cn", "en-US", true).find(tool => tool.name === "parse_document")
+    .inputSchema.properties.context.title, "Business purpose");
+});
+
+test("concurrent core calls strip analytics from business bodies and prefer explicit request model metadata", async t => {
+  const { client, calls, statistics } = await connect(t, ({ path, body }) => {
+    assert.equal(path, documentPrefix + "/recognize/create/task");
+    assert.deepEqual(Object.keys(body).sort(), ["app_id", "file_url", "model_params"]);
+    return ok({ task_id: "accepted" });
+  });
+  const cases = [
+    { context: "合同内容翻译准备", llm_model: "self-model-a", meta: { "x-codex-turn-metadata": { model: "gpt-test-model" },
+      "io.modelcontextprotocol/aiInvocation": { model: { name: "lower-priority-model" } } }, expected: "gpt-test-model", source: "client_metadata" },
+    { context: "报销材料整理", llm_model: "self-model-b", meta: { "x-codex-turn-metadata": JSON.stringify({ model: "codex-json-model" }) },
+      expected: "codex-json-model", source: "client_metadata" },
+    { context: "采购材料核验", llm_model: "self-model-c", meta: { "io.modelcontextprotocol/aiInvocation": { model: { name: "invocation-model" } } },
+      expected: "invocation-model", source: "client_metadata" },
+    { context: "合同归档阅读", llm_model: "Qwen3-235B-A22B-Thinking-2507", meta: { "io.modelcontextprotocol/aiInvocation": { model: "not-a-model-object" } },
+      expected: "Qwen3-235B-A22B-Thinking-2507", source: "self_reported" }
+  ];
+  const replies = await Promise.all(cases.map(({ context, llm_model, meta }) => client.callTool({ name: "parse_document",
+    arguments: { file_url: fileUrl + "?private=not-for-statistics", wait: false, context, llm_model }, _meta: meta })));
+  assert.ok(replies.every(reply => reply.structuredContent.status === "pending"));
+  assert.equal(calls.length, cases.length);
+  assert.equal(statistics.length, cases.length);
+  assert.equal(new Set(statistics.map(call => call.body.metadata.event_id)).size, cases.length);
+  for (const expected of cases) {
+    const event = statistics.find(call => call.body.metadata.context === expected.context);
+    assert.equal(event.method, "POST");
+    assert.equal(event.body.command, "parse_document");
+    assert.equal(event.body.metadata.llm_model, expected.expected);
+    assert.equal(event.body.metadata.llm_model_source, expected.source);
+    assert.equal(event.body.metadata.client_name, "adp-v2-test");
+    assert.equal(event.body.metadata.client_version, "1.0.0");
+    assert.match(event.body.metadata.event_id, /^[a-f0-9]{32}$/);
+    assert.ok(Number.isInteger(event.body.metadata.duration_ms) && event.body.metadata.duration_ms >= 0);
+    assert.equal(event.body.metadata.status, "success");
+    assert.equal(event.body.metadata.stage, "execution");
+    assert.ok(!JSON.stringify(event.body).includes("not-for-statistics"));
+  }
+});
+
+test("bad analytics values never fail core business calls and noncore tools retain strict argument validation", async t => {
+  const { client, calls, statistics } = await connect(t, ({ path, body }) => {
+    assert.equal(path, documentPrefix + "/extract/direct-fast");
+    assert.deepEqual(body, { file: { url: fileUrl }, fields: [{ name: "total" }] });
+    return ok({ extraction_result: [] });
+  });
+  const invalid = [
+    { context: { original: "do not retain this" }, llm_model: ["not-a-string"] },
+    { context: "contact user@example.invalid", llm_model: "unknown" },
+    { context: "电话13800138000", llm_model: "https://private.invalid/model" },
+    { context: "来源 file:///private/document", llm_model: "file:///private/model" },
+    { context: "来源 jobid://private-task", llm_model: "jobid://private-model" },
+    { context: "sk-abcdef0123456789", llm_model: "sk-0123456789abcdef" },
+    { context: "业务".repeat(200), llm_model: "m".repeat(129) }
+  ];
+  for (const values of invalid) {
+    const reply = await call(client, "extract_document", { file_url: fileUrl, fields: [{ name: "total" }], ...values });
+    assert.equal(reply.structuredContent.status, "succeeded");
+    const metadata = statistics.at(-1).body.metadata;
+    assert.ok(!("context" in metadata));
+    assert.ok(!("llm_model" in metadata));
+    assert.ok(!("llm_model_source" in metadata));
+  }
+  const noncore = await client.callTool({ name: "get_credits", arguments: { context: "余额查询", llm_model: "some-model" },
+    _meta: { "x-codex-turn-metadata": { model: "metadata-model" } } });
+  assert.equal(noncore.structuredContent.error.code, "INVALID_ARGUMENTS");
+  assert.equal(calls.length, invalid.length);
+  const event = statistics.at(-1).body.metadata;
+  assert.equal(event.status, "failure");
+  assert.equal(event.stage, "input_validation");
+  assert.ok(!("context" in event) && !("llm_model" in event));
+  assert.equal(statistics.length, invalid.length + 1);
+});
+
+test("disabled analytics parameters are hidden and rejected instead of silently stripped", async t => {
+  const { client, calls, statistics } = await connect(t, () => ok({ task_id: "accepted" }), "test-key",
+    { ADP_MCP_ANALYTICS_PARAMETERS: "false" });
+  const { tools } = await client.listTools();
+  for (const tool of tools) {
+    assert.ok(!("context" in tool.inputSchema.properties));
+    assert.ok(!("llm_model" in tool.inputSchema.properties));
+  }
+  const rejected = await call(client, "parse_document", { file_url: fileUrl, context: "合同核验", llm_model: "self-model" });
+  assert.equal(rejected.structuredContent.error.code, "INVALID_ARGUMENTS");
+  assert.equal(calls.length, 0);
+  const accepted = await client.callTool({ name: "parse_document", arguments: { file_url: fileUrl, wait: false },
+    _meta: { "x-codex-turn-metadata": { model: "client-model" } } });
+  assert.equal(accepted.structuredContent.status, "pending");
+  assert.equal(calls.length, 1);
+  assert.equal(statistics.length, 2);
+  for (const { body } of statistics) assert.ok(!("context" in body.metadata) && !("llm_model" in body.metadata));
+});
+
+for (const failure of ["http-error", "timeout"]) {
+  test(`statistics ${failure} preserves the business result and never repeats either request`, { timeout: 5000 }, async t => {
+    const { client, calls, statistics } = await connect(t, () => ok({ task_id: "accepted" }), "test-key", {}, {
+      statisticsResponder(_call, response) {
+        if (failure === "timeout") return new Promise(() => {});
+        response.statusCode = 500;
+        return { code: "server_error", message: "statistics fixture unavailable" };
+      }
+    });
+    const reply = await call(client, "parse_document", { file_url: fileUrl, wait: false, context: "文档阅读准备" });
+    assert.equal(reply.structuredContent.status, "pending");
+    assert.equal(calls.length, 1);
+    assert.equal(statistics.length, 1);
+  });
+}
+
+test("caller cancellation does not cancel the independent statistics request", { timeout: 5000 }, async t => {
+  let startBusiness;
+  let gotStatistics;
+  const started = new Promise(resolve => { startBusiness = resolve; });
+  const reported = new Promise(resolve => { gotStatistics = resolve; });
+  const { client, calls, statistics } = await connect(t, () => {
+    startBusiness();
+    return new Promise(() => {});
+  }, "test-key", {}, { statisticsResponder() { gotStatistics(); return ok({}); } });
+  const controller = new AbortController();
+  const pending = client.callTool({ name: "parse_document", arguments: { file_url: fileUrl, wait: false } },
+    undefined, { signal: controller.signal });
+  await started;
+  controller.abort();
+  await assert.rejects(pending);
+  await reported;
+  assert.equal(calls.length, 1);
+  assert.equal(statistics.length, 1);
+  assert.equal(statistics[0].body.metadata.status, "failure");
+  assert.equal(statistics[0].body.metadata.reason, "interrupted");
+});
 
 test("tool discovery publishes the reviewed catalog and guide in both locales", async t => {
   const expected = JSON.parse(await readFile(new URL("../catalog/tools.zh-CN.json", import.meta.url), "utf8"));
@@ -104,8 +266,13 @@ test("tool discovery publishes the reviewed catalog and guide in both locales", 
   }
   for (const tool of tools) checkForm(tool.inputSchema, tool.name);
   const extractProperties = tools.find(tool => tool.name === "extract_document").inputSchema.properties;
-  assert.ok("file_url" in extractProperties && "file_base64" in extractProperties);
+  assert.ok("file_url" in extractProperties && !("file_base64" in extractProperties));
   assert.ok(!("file" in extractProperties));
+  const createProperties = tools.find(tool => tool.name === "create_app").inputSchema.properties;
+  assert.deepEqual(createProperties.engine_type.enum, ["extract", "classify"]);
+  assert.equal(createProperties.engine_type.default, "extract");
+  assert.doesNotMatch(JSON.stringify(tools), /ai_function|1425|1426/);
+  assert.doesNotMatch(JSON.stringify(tools), /base64/i);
   const guide = await call(client, "get_adp_guide");
   assert.match(guide.content[0].text, /按指定字段同步抽取/);
   assert.match(guide.content[0].text, /用户明确要求或同意提交后，再调用 `submit_user_feedback`/);
@@ -356,18 +523,18 @@ test("document tools use their OpenAPI single-file bodies and reject mixed shape
     ["extract_document", { app_id: "custom-app", fields: [{ name: "客户" }], file_url: fileUrl }],
     ["extract_document", { app_id: "a", file_url: "jobid://00112233445566778899aabbccddeeff", file_base64 }],
     ["classify_document", { app_id: "classify-app", files: [{ url: fileUrl }] }],
-    ["classify_document", { app_id: "classify-app", file_base64, pages: [1, 1] }],
+    ["classify_document", { app_id: "classify-app", file_url: fileUrl, pages: [1, 1] }],
   ]) {
     const result = await call(client, name, args);
     assert.equal(result.isError, true, name + JSON.stringify(args));
   }
   assert.equal(calls.length, 0);
   const parsed = (await call(client, "parse_document", {
-    file_name: "notes.pdf", file_base64, pages: [2, 4], remove_header_footer: true, enable_stamp_recognition: true, wait: false
+    file_name: "notes.pdf", file_url: fileUrl, pages: [2, 4], remove_header_footer: true, enable_stamp_recognition: true, wait: false
   })).structuredContent;
   assert.deepEqual(parsed.task_ref, { kind: "parse", id: "accepted" });
   assert.deepEqual(calls.at(-1).body, {
-    app_id: "ootb_k7m2x9p4v1n8w3q6r5t0y2b4", file_name: "notes.pdf", file_base64,
+    app_id: "ootb_k7m2x9p4v1n8w3q6r5t0y2b4", file_name: "notes.pdf", file_url: fileUrl,
     model_params: { pages: [2, 4], recognize_config: { recognize_mode: "agentic_v2",
       remove_header_footer: true, enable_stamp_recognition: true, enable_pdf_parse: false } }
   });
@@ -375,7 +542,7 @@ test("document tools use their OpenAPI single-file bodies and reject mixed shape
   assert.equal(enhanced.structuredContent.status, "pending");
   assert.deepEqual(calls.at(-1).body.model_params, { recognize_config: { recognize_mode: "fast_vlm" } });
   const jobid = "jobid://00112233445566778899aabbccddeeff";
-  for (const input of [{ file_url: jobid }, { file_url: fileUrl, file_base64 }]) {
+  for (const input of [{ file_url: jobid }, { file_url: fileUrl }]) {
     const r = await call(client, "extract_document", { app_id: "team-contract", ...input, fields: [], pages: [3], wait: false });
     assert.equal(r.structuredContent.status, "pending");
     assert.deepEqual(calls.at(-1).body, { app_id: "team-contract", ...input, model_params: { pages: [3] } });
@@ -383,8 +550,8 @@ test("document tools use their OpenAPI single-file bodies and reject mixed shape
   const fields = [{ name: "客户", prompt: null }];
   for (const [input, expectedFile] of [
     [{ file_url: fileUrl, pages: [], wait: true, wait_timeout_seconds: 60 }, { url: fileUrl }],
-    [{ file_base64, file_name: "" }, { base64: file_base64 }],
-    [{ file: { base64: file_base64 } }, { base64: file_base64 }],
+    [{ file_url: fileUrl, file_name: "" }, { url: fileUrl }],
+    [{ file: { url: fileUrl } }, { url: fileUrl }],
   ]) {
     const direct = (await call(client, "extract_document", { ...input, fields })).structuredContent;
     assert.equal(direct.status, "succeeded");
@@ -392,12 +559,31 @@ test("document tools use their OpenAPI single-file bodies and reject mixed shape
     assert.equal(calls.at(-1).path, documentPrefix + "/extract/direct-fast");
     assert.deepEqual(calls.at(-1).body, { file: expectedFile, fields });
   }
-  const classify = (await call(client, "classify_document", { file_base64, app_id: "classify", pages: [2, 3], wait: false })).structuredContent;
+  const classify = (await call(client, "classify_document", { file_url: fileUrl, app_id: "classify", pages: [2, 3], wait: false })).structuredContent;
   assert.deepEqual(classify.task_ref, { kind: "classify", id: "accepted" });
-  assert.deepEqual(calls.at(-1).body, { file_base64, app_id: "classify", model_params: { pages: [2, 3] } });
-  const allPages = await call(client, "classify_document", { file_base64, app_id: "classify", pages: [], wait: false });
+  assert.deepEqual(calls.at(-1).body, { file_url: fileUrl, app_id: "classify", model_params: { pages: [2, 3] } });
+  const allPages = await call(client, "classify_document", { file_url: fileUrl, app_id: "classify", pages: [], wait: false });
   assert.equal(allPages.structuredContent.status, "pending");
-  assert.deepEqual(calls.at(-1).body, { file_base64, app_id: "classify" });
+  assert.deepEqual(calls.at(-1).body, { file_url: fileUrl, app_id: "classify" });
+});
+
+test("document tools reject removed Base64 inputs and data URLs before any business request", async t => {
+  const { client, calls } = await connect(t, () => assert.fail("Unexpected business request"));
+  const encoded = "cGRm";
+  const dataUrl = "data:application/pdf;base64," + encoded;
+  const fields = [{ name: "total" }];
+  const modes = [["parse_document", {}], ["classify_document", { app_id: "classify" }],
+    ["extract_document", { app_id: "custom" }], ["extract_document", { fields }]];
+  for (const [name, mode] of modes) {
+    for (const source of [{ file_base64: encoded }, { file_url: fileUrl, file_base64: encoded },
+      { file_url: dataUrl }, { file: { base64: encoded } }, { file: { url: dataUrl } },
+      { file: { url: fileUrl, base64: encoded } }]) {
+      const reply = await call(client, name, { ...mode, ...source });
+      assert.equal(reply.isError, true, name + JSON.stringify(source));
+      assert.equal(reply.structuredContent.error.code, "INVALID_ARGUMENTS");
+    }
+  }
+  assert.equal(calls.length, 0);
 });
 
 for (const language of ["zh", "en-US"]) {
@@ -412,11 +598,11 @@ for (const language of ["zh", "en-US"]) {
       }
     }, "test-key", { ADP_ACCEPT_LANGUAGE: language });
     const messages = language === "zh" ? {
-      missing_file_source: /缺少待处理文件.*file_url 或 file_base64/,
+      missing_file_source: /缺少待处理文件.*file_url 提供一份文件的下载地址/,
       incomplete_task_ref: /task_ref（包含 kind 和 id）.*同时传入 task_type 和 task_id/,
       file_name_not_supported_with_fields: /移除 file_name，保留文件来源和 fields/
     } : {
-      missing_file_source: /Provide one file using file_url or file_base64/,
+      missing_file_source: /Provide its download URL in file_url/,
       incomplete_task_ref: /task_ref containing kind and id.*both task_type and task_id/,
       file_name_not_supported_with_fields: /remove file_name and retry with the file source and fields/
     };
@@ -468,7 +654,8 @@ for (const language of ["zh", "en-US"]) {
 
 test("app discovery, extraction configuration and credits follow the tenant-scoped OpenAPI", async t => {
   const base = "/open/agentic_doc_processor/test-tenant/v1";
-  const app = { app_id: "app-a", app_name: "合同", source: "custom", engine_type: "extract" };
+  const app = { app_id: "app-a", app_name: "合同", source: "custom", engine_type: "extract", ai_function: 1425,
+    output_schema: { properties: { ai_function: { type: "string" } } } };
   const fields = [{ field_key: "amount", field_name: "金额", field_type: "number" }];
   const credit = { total_credits: 12, used_credits: 3, expired_credits: 0, remaining_credits: 9 };
   const { client, calls } = await connect(t, ({ path }) => {
@@ -477,26 +664,37 @@ test("app discovery, extraction configuration and credits follow the tenant-scop
     if (url.pathname === base + "/app-catalog") return ok({ list: [app], range: { offset: 0, size: 1, total: 1 } });
     if (url.pathname === base + "/app-manage/create") return ok({ ...app, config_version: "v1" });
     if (url.pathname === base + "/app-catalog/extraction/update") return ok({ ...app, config_version: "v2" });
-    if (url.pathname === base + "/app-catalog/extraction/delete") return ok({ success: true, message: "" });
+    if (url.pathname === base + "/app-catalog/extraction/delete") return ok({ success: true, message: "", ai_function: 1425 });
     if (url.pathname === base + "/user/payment") return { user_id: "discard", payment_type: "free", ...credit };
     assert.fail(path);
   });
   const query = { engine_type: "extract", source: "preset", app_name: "中文&test=1", document_type: "身份证" };
   const listed = (await call(client, "list_apps", query)).structuredContent;
   assert.equal(listed.status, "succeeded");
+  assert.equal(Object.hasOwn(listed.data.list[0], "ai_function"), false);
+  assert.equal(listed.data.list[0].engine_type, "extract");
+  assert.deepEqual(listed.data.list[0].output_schema, app.output_schema);
   assert.deepEqual(Object.fromEntries(new URL(calls.at(-1).path, "http://fixture.invalid").searchParams), query);
   const detail = (await call(client, "get_app", { app_id: "app-a", config_version: "v1" })).structuredContent;
   assert.deepEqual(detail.data.extract_fields, fields);
-  const created = (await call(client, "create_extraction_app", { app_name: "合同", extract_fields: fields, timeout_seconds: 20 })).structuredContent;
+  assert.equal(Object.hasOwn(detail.data, "ai_function"), false);
+  assert.deepEqual(detail.data.output_schema, app.output_schema);
+  const created = (await call(client, "create_app", { app_name: "合同", extract_fields: fields, timeout_seconds: 20 })).structuredContent;
   assert.equal(created.config_version, "v1");
+  assert.equal(created.engine_type, "extract");
+  assert.equal(Object.hasOwn(created, "ai_function"), false);
   assert.deepEqual(calls.at(-1).body, { ai_function: 1425, app_name: "合同", extract_fields: fields });
   const update = { app_id: detail.data.app_id, extract_fields: detail.data.extract_fields, config_version: "v1" };
-  const updated = (await call(client, "update_extraction_app", update)).structuredContent;
+  const updated = (await call(client, "update_app", update)).structuredContent;
   assert.equal(updated.config_version, "v2");
+  assert.equal(updated.engine_type, "extract");
+  assert.equal(Object.hasOwn(updated, "ai_function"), false);
+  assert.deepEqual(updated.output_schema, app.output_schema);
   assert.equal(calls.at(-1).path, base + "/app-catalog/extraction/update");
   assert.deepEqual(calls.at(-1).body, update);
-  const deleted = (await call(client, "delete_extraction_app", { app_id: "app-a" })).structuredContent;
+  const deleted = (await call(client, "delete_app", { app_id: "app-a" })).structuredContent;
   assert.equal(deleted.success, true);
+  assert.equal(Object.hasOwn(deleted, "ai_function"), false);
   assert.equal(calls.at(-1).path, base + "/app-catalog/extraction/delete");
   assert.deepEqual(calls.at(-1).body, { app_id: "app-a" });
   assert.deepEqual((await call(client, "get_credits")).structuredContent, { status: "succeeded", data: credit });
@@ -508,13 +706,13 @@ test("app discovery, extraction configuration and credits follow the tenant-scop
   for (const hiddenType of ["workflow", "document"]) {
     assert.equal((await call(client, "list_apps", { engine_type: hiddenType })).isError, true);
   }
-  assert.equal((await call(client, "update_extraction_app", { app_id: "app-a" })).isError, true);
+  assert.equal((await call(client, "update_app", { app_id: "app-a" })).isError, true);
   assert.equal(calls.length, 7);
 });
 
-test("create_extraction_app creates a reusable classifier and its ID can classify a file", async t => {
+test("create_app creates a reusable classifier and its ID can classify a file", async t => {
   const config = {
-    ai_function: 1426, app_name: "报销材料", description: "识别报销附件",
+    engine_type: "classify", app_name: "报销材料", description: "识别报销附件",
     classify_types: [
       { category_key: "invoice", type_name: "发票" },
       { category_key: "proof", type_name: "付款凭证", description: "包含付款方、收款方和实付金额" }
@@ -523,7 +721,8 @@ test("create_extraction_app creates a reusable classifier and its ID can classif
   const { client, calls } = await connect(t, ({ method, path, body }) => {
     assert.equal(method, "POST");
     if (path.endsWith("/app-manage/create")) {
-      assert.deepEqual(body, config);
+      const { engine_type, ...configuration } = config;
+      assert.deepEqual(body, { ...configuration, ai_function: 1426 });
       return ok({ ...body, app_id: "class-app", config_version: "v1",
         classify_types: body.classify_types.map(item => ({ description: null, ...item })) });
     }
@@ -532,10 +731,11 @@ test("create_extraction_app creates a reusable classifier and its ID can classif
     return ok({ status: "success", segments: [{ category_key: "invoice", category_name: "发票", pages: [1] }],
       unclassified_pages: [] });
   });
-  const created = await call(client, "create_extraction_app", { ...config, timeout_seconds: 20, extract_fields: [],
+  const created = await call(client, "create_app", { ...config, timeout_seconds: 20, extract_fields: [],
     app_label: [], classify_types: [{ category_key: "invoice", type_name: " 发票 " }, config.classify_types[1]] });
   assert.notEqual(created.isError, true);
-  assert.equal(created.structuredContent.ai_function, 1426);
+  assert.equal(created.structuredContent.engine_type, "classify");
+  assert.equal(Object.hasOwn(created.structuredContent, "ai_function"), false);
   assert.equal(created.structuredContent.config_version, "v1");
   const classified = await call(client, "classify_document", { app_id: created.structuredContent.app_id, file_url: fileUrl });
   assert.equal(classified.structuredContent.status, "succeeded");
@@ -547,9 +747,11 @@ test("application creation validates the selected type before submitting a write
   const { client, calls } = await connect(t, () => ok({ app_id: "extract-id", app_name: "字段", config_version: "v1" }));
   const category = { category_key: "invoice", type_name: "Invoice" };
   const field = { field_key: "amount", field_name: "金额", field_type: "number" };
-  const classify = { ai_function: 1426, classify_types: [category] };
+  const classify = { engine_type: "classify", classify_types: [category] };
   for (const options of [
-    {}, { classify_types: [category] }, { ...classify, ai_function: 1401 }, { ...classify, ai_function: 1425 },
+    {}, { classify_types: [category] }, { ...classify, engine_type: "parse" }, { ...classify, engine_type: "extract" },
+    { ...classify, engine_type: "workflow" }, { ...classify, engine_type: 1426 },
+    { ai_function: 1425, extract_fields: [field] }, { ...classify, ai_function: 1426 },
     { ...classify, extract_fields: [field] }, { ...classify, classify_types: [] },
     { ...classify, app_code: "tag" }, { ...classify, enable_highlight: false },
     { ...classify, classify_types: [{ ...category, category_key: "0bad" }] },
@@ -558,26 +760,29 @@ test("application creation validates the selected type before submitting a write
     { ...classify, classify_types: [category, { category_key: "other", type_name: " invoice " }] },
     { ...classify, classify_types: Array.from({ length: 11 }, (_, i) => ({ category_key: "c" + i, type_name: "t" + i })) }
   ]) {
-    const reply = await call(client, "create_extraction_app", { app_name: "规则", ...options });
+    const reply = await call(client, "create_app", { app_name: "规则", ...options });
     assert.equal(reply.structuredContent.error.code, "INVALID_ARGUMENTS", JSON.stringify(options));
   }
   assert.equal(calls.length, 0);
-  const created = await call(client, "create_extraction_app", { app_name: "字段", ai_function: 1425,
+  const created = await call(client, "create_app", { app_name: "字段", engine_type: "extract",
     extract_fields: [field], classify_types: [] });
   assert.equal(created.structuredContent.app_id, "extract-id");
+  assert.equal(created.structuredContent.engine_type, "extract");
+  assert.equal(Object.hasOwn(created.structuredContent, "ai_function"), false);
   assert.deepEqual(calls[0].body, { ai_function: 1425, app_name: "字段", extract_fields: [field] });
 });
 
 test("classifier creation requires confirmation of the requested application type and categories", async t => {
-  const config = { app_name: "报销包", ai_function: 1426, classify_types: [{ category_key: "bill", type_name: "票据" }] };
+  const config = { app_name: "报销包", engine_type: "classify", classify_types: [{ category_key: "bill", type_name: "票据" }] };
   const receipt = { app_id: "a", app_name: "报销包", config_version: "v1" };
   const invalid = [receipt, { ...receipt, ai_function: 1425 }, { ...receipt, ai_function: 1426 },
     { ...receipt, ai_function: 1426, classify_types: [] },
-    { ...receipt, ai_function: 1426, classify_types: [{ type_name: "票据" }] }];
+    { ...receipt, ai_function: 1426, classify_types: [{ type_name: "票据" }] },
+    { ...receipt, ai_function: 1426, engine_type: "extract", classify_types: config.classify_types }];
   let index = 0;
   const { client, calls } = await connect(t, () => ok(invalid[index++]));
   for (const _case of invalid) {
-    const reply = await call(client, "create_extraction_app", config);
+    const reply = await call(client, "create_app", config);
     assert.equal(reply.structuredContent.error.acceptance_unknown, true);
   }
   assert.equal(calls.length, invalid.length);
@@ -590,17 +795,17 @@ test("extraction app forms normalize empty placeholders while preserving field a
   const date = { field_key: "date", field_name: "日期", field_type: "date" };
   const table = { field_key: "rows", field_name: "明细", field_type: "table" };
   for (const [name, args] of [
-    ["update_extraction_app", { app_id: "app-a", extract_fields: [] }],
-    ["update_extraction_app", { app_id: "app-a", app_name: "合同", config_version: "v1", extract_fields: [] }],
-    ["create_extraction_app", { app_name: "合同", extract_fields: [{ ...table, sub_fields: [] }] }],
-    ["create_extraction_app", { app_name: "合同", extract_fields: [{ field_name: "金额", field_type: "number" }] }],
-    ["create_extraction_app", { app_name: "合同", extract_fields: [{ ...amount, format: { mode: "preset", preset: "date_iso" } }] }],
-    ["update_extraction_app", { app_id: "app-a", config_version: "v1", extract_fields: [{ ...amount, sub_fields: [date] }] }],
+    ["update_app", { app_id: "app-a", extract_fields: [] }],
+    ["update_app", { app_id: "app-a", app_name: "合同", config_version: "v1", extract_fields: [] }],
+    ["create_app", { app_name: "合同", extract_fields: [{ ...table, sub_fields: [] }] }],
+    ["create_app", { app_name: "合同", extract_fields: [{ field_name: "金额", field_type: "number" }] }],
+    ["create_app", { app_name: "合同", extract_fields: [{ ...amount, format: { mode: "preset", preset: "date_iso" } }] }],
+    ["update_app", { app_id: "app-a", config_version: "v1", extract_fields: [{ ...amount, sub_fields: [date] }] }],
   ]) {
     assert.equal((await call(client, name, args)).isError, true, JSON.stringify(args));
   }
   assert.equal(calls.length, 0);
-  const created = await call(client, "create_extraction_app", {
+  const created = await call(client, "create_app", {
     app_name: "合同", extract_fields: [
       { ...amount, format: {}, sub_fields: [] }, { ...table, format: {}, sub_fields: [{ ...date, format: {} }] },
     ],
@@ -608,11 +813,11 @@ test("extraction app forms normalize empty placeholders while preserving field a
   assert.notEqual(created.isError, true);
   assert.deepEqual(calls.at(-1).body, { ai_function: 1425, app_name: "合同", extract_fields: [amount, { ...table, sub_fields: [date] }] });
   const metadata = { app_id: "app-a", description: "" };
-  assert.notEqual((await call(client, "update_extraction_app", { ...metadata, extract_fields: [] })).isError, true);
+  assert.notEqual((await call(client, "update_app", { ...metadata, extract_fields: [] })).isError, true);
   assert.deepEqual(calls.at(-1).body, metadata);
   const update = { app_id: "app-a", config_version: "v1" };
   for (const [format, expected] of [[{}, amount], [null, { ...amount, format: null }]]) {
-    const reply = await call(client, "update_extraction_app", { ...update, extract_fields: [{ ...amount, format }] });
+    const reply = await call(client, "update_app", { ...update, extract_fields: [{ ...amount, format }] });
     assert.notEqual(reply.isError, true);
     assert.deepEqual(calls.at(-1).body, { ...update, extract_fields: [expected] });
   }
@@ -623,7 +828,7 @@ test("incomplete account or mutation receipts stay unknown and no POST is repeat
   const balance = (await call(client, "get_credits")).structuredContent;
   assert.equal(balance.status, "failed");
   assert.equal(balance.data, undefined);
-  const creation = await call(client, "create_extraction_app", {
+  const creation = await call(client, "create_app", {
     app_name: "X", extract_fields: [{ field_name: "Id", field_key: "id", field_type: "string" }]
   });
   assert.equal(creation.structuredContent.error.acceptance_unknown, true);
@@ -637,9 +842,9 @@ test("older deployments never receive fallback writes or report a mismatched app
     return { detail: "Not Found" };
   });
   for (const [tool, args] of [
-    ["update_extraction_app", { app_id: "unavailable", app_name: "new" }],
-    ["delete_extraction_app", { app_id: "unavailable" }],
-    ["update_extraction_app", { app_id: "updated", app_name: "new" }]
+    ["update_app", { app_id: "unavailable", app_name: "new" }],
+    ["delete_app", { app_id: "unavailable" }],
+    ["update_app", { app_id: "updated", app_name: "new" }]
   ]) {
     const result = await call(client, tool, args);
     assert.equal(result.isError, true);
@@ -991,6 +1196,89 @@ test("uploads local bytes, maps custom fields, and calls classification only", a
   const customArray = await call(client, "extract_document", { files: [{ url: fileUrl }], fields });
   assert.equal(customArray.isError, true);
   assert.equal(calls.length, 4);
+});
+
+test("one upload_file call sends more than twenty files over HTTP concurrently and preserves input indexes", async t => {
+  const count = 25;
+  const directory = await mkdtemp(join(tmpdir(), "adp-mcp-parallel-upload-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const files = await Promise.all(Array.from({ length: count }, async (_, index) => {
+    const file_path = join(directory, `upload-${index}.txt`);
+    await writeFile(file_path, `parallel upload ${index}`);
+    return { file_path };
+  }));
+  let active = 0;
+  let peak = 0;
+  let release;
+  const allArrived = new Promise(resolve => { release = resolve; });
+  const safetyTimeout = setTimeout(() => release(), 3000);
+  t.after(() => clearTimeout(safetyTimeout));
+  const { client, calls } = await connect(t, async ({ method, path, body }) => {
+    assert.equal(method, "POST");
+    assert.equal(path, workflowPrefix + "/files/upload");
+    const index = Number(/filename="upload-(\d+)\.txt"/.exec(body)[1]);
+    assert.match(body, new RegExp(`parallel upload ${index}\\r\\n`));
+    active++;
+    peak = Math.max(peak, active);
+    if (active === count) release();
+    try {
+      await allArrived;
+      await new Promise(resolve => setTimeout(resolve, count - index));
+      return ok({ download_url: `https://example.invalid/uploads/${index}`, file_name: `server-renamed-${index}.bin` });
+    } finally {
+      active--;
+    }
+  });
+  const reply = await call(client, "upload_file", { files });
+  assert.notEqual(reply.isError, true);
+  assert.equal(reply.structuredContent.status, "succeeded");
+  assert.equal(calls.length, count);
+  assert.equal(peak, count, "all uploads must be in flight before any response is released");
+  assert.deepEqual(reply.structuredContent.files.map(({ index, file_path, file_name, data }) =>
+    [index, file_path, file_name, data.download_url]),
+  Array.from({ length: count }, (_, index) =>
+    [index, files[index].file_path, `upload-${index}.txt`, `https://example.invalid/uploads/${index}`]));
+});
+
+test("parallel uploads keep mixed local and HTTP failures indexed without resending successful files", async t => {
+  const directory = await mkdtemp(join(tmpdir(), "adp-mcp-mixed-upload-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const localPaths = [join(directory, "first", "report.txt"), join(directory, "missing", "report.txt"),
+    join(directory, "http-error", "report.txt"), join(directory, "second", "report.txt"),
+    join(directory, "合同 副本.txt")];
+  await Promise.all(["first", "http-error", "second"].map(name => mkdir(join(directory, name))));
+  await Promise.all([0, 2, 3, 4].map(index => writeFile(localPaths[index], `mixed upload ${index}`)));
+  const files = [...localPaths.map((file_path, index) => ({ file_path: index === 4 ? pathToFileURL(file_path).href : file_path })),
+    { file_path: "file:///invalid%ZZ.txt" }, { file_path: parse(directory).root }];
+  const { client, calls, statistics } = await connect(t, async ({ method, path, body }, response) => {
+    assert.equal(method, "POST");
+    assert.equal(path, workflowPrefix + "/files/upload");
+    const index = Number(/mixed upload (\d+)/.exec(body)[1]);
+    if (index === 2) {
+      response.statusCode = 503;
+      return { code: "server_error", message: "fixture storage unavailable", data: null };
+    }
+    await new Promise(resolve => setTimeout(resolve, index === 0 ? 30 : 5));
+    return ok({ download_url: `https://example.invalid/uploads/${index}`, file_name: "backend-name.bin" });
+  });
+  const reply = (await call(client, "upload_file", { files })).structuredContent;
+  assert.equal(reply.status, "partial_success");
+  assert.equal(statistics.length, 1);
+  assert.equal(statistics[0].body.metadata.status, "partial_success");
+  assert.ok(!("context" in statistics[0].body.metadata) && !("llm_model" in statistics[0].body.metadata));
+  assert.deepEqual(reply.files.map(({ index, status }) => [index, status]),
+    [[0, "succeeded"], [1, "failed"], [2, "failed"], [3, "succeeded"], [4, "succeeded"], [5, "failed"], [6, "failed"]]);
+  assert.deepEqual(reply.files.map(({ file_path }) => file_path), files.map(({ file_path }) => file_path));
+  assert.deepEqual(reply.files.map(({ file_name }) => file_name),
+    ["report.txt", "report.txt", "report.txt", "report.txt", "合同 副本.txt", "", ""]);
+  assert.equal(reply.files[0].data.download_url, "https://example.invalid/uploads/0");
+  assert.equal(reply.files[3].data.download_url, "https://example.invalid/uploads/3");
+  assert.equal(reply.files[4].data.download_url, "https://example.invalid/uploads/4");
+  assert.equal(reply.files[4].file_path, pathToFileURL(localPaths[4]).href);
+  assert.ok(reply.files[1].error && reply.files[2].error);
+  for (const index of [1, 5, 6]) assert.equal(reply.files[index].error.code, "INVALID_LOCAL_FILE");
+  assert.equal(calls.length, 4);
+  assert.deepEqual(calls.map(({ body }) => Number(/mixed upload (\d+)/.exec(body)[1])).sort(), [0, 2, 3, 4]);
 });
 
 test("removed workflow runner is rejected without any business request", async t => {

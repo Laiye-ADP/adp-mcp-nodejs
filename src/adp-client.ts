@@ -92,8 +92,8 @@ const documentedErrorFixes = {
     en: "Check the application identifier or application credentials and confirm the current account can access the application.",
   },
   FILE_SOURCE_REQUIRED: {
-    zh: "请提供可访问的 file_url 或有效的 file_base64，再发起请求。",
-    en: "Provide an accessible file_url or valid file_base64 before making another request.",
+    zh: "请提供可访问的 file_url，再发起请求。",
+    en: "Provide an accessible file_url before making another request.",
   },
   TASK_NOT_AVAILABLE: {
     zh: "请使用同类异步创建接口返回的 task_id，并核对账号、租户和区域；不要自动重新提交处理任务。",

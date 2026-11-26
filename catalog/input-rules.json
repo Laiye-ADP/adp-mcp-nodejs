@@ -140,20 +140,13 @@
     "not": {
       "required": ["recognize_mode", "enable_highlight"],
       "properties": {"recognize_mode": {"const": "thai_ocr"}, "enable_highlight": {"const": 1}}
-    },
-    "oneOf": [{"required": ["file_url"]}, {"required": ["file_base64"]}]
+    }
   },
   "extract_document": {
     "oneOf": [
       {
-        "required": ["app_id"],
-        "not": {"anyOf": [{"required": ["file"]}, {"required": ["fields"]}]},
-        "anyOf": [{"required": ["file_url"]}, {"required": ["file_base64"]}],
-        "if": {
-          "required": ["file_url"],
-          "properties": {"file_url": {"pattern": "^[Jj][Oo][Bb][Ii][Dd]:"}}
-        },
-        "then": {"not": {"required": ["file_base64"]}}
+        "required": ["app_id", "file_url"],
+        "not": {"anyOf": [{"required": ["file"]}, {"required": ["fields"]}]}
       },
       {
         "required": ["fields", "file"],
@@ -161,7 +154,6 @@
           "anyOf": [
             {"required": ["app_id"]},
             {"required": ["file_url"]},
-            {"required": ["file_base64"]},
             {"required": ["file_name"]},
             {"required": ["pages"]},
             {"required": ["with_rec_result"]},
@@ -180,11 +172,10 @@
       "file": {
         "type": "object",
         "properties": {
-          "url": {"type": "string", "format": "uri", "pattern": "^https?://[^\\s]+$"},
-          "base64": {"type": "string", "minLength": 1, "pattern": "\\S", "contentEncoding": "base64"}
+          "url": {"type": "string", "format": "uri", "pattern": "^https?://[^\\s]+$"}
         },
         "additionalProperties": false,
-        "oneOf": [{"required": ["url"]}, {"required": ["base64"]}]
+        "required": ["url"]
       },
       "fields": {
         "type": "array",
@@ -203,18 +194,17 @@
       }
     }
   },
-  "classify_document": {"oneOf": [{"required": ["file_url"]}, {"required": ["file_base64"]}]},
-  "create_extraction_app": {
+  "create_app": {
     "oneOf": [
       {
         "required": ["extract_fields"],
-        "properties": {"ai_function": {"const": 1425}},
+        "properties": {"engine_type": {"const": "extract"}},
         "not": {"required": ["classify_types"]}
       },
       {
-        "required": ["ai_function", "classify_types"],
+        "required": ["engine_type", "classify_types"],
         "properties": {
-          "ai_function": {"const": 1426},
+          "engine_type": {"const": "classify"},
           "extract_fields": false,
           "app_code": false,
           "app_label": false,
@@ -271,7 +261,7 @@
       "app_label": {"type": ["array", "null"], "maxItems": 5, "items": {"type": "string"}}
     }
   },
-  "update_extraction_app": {
+  "update_app": {
     "anyOf": [{"required": ["app_name"]}, {"required": ["description"]}, {"required": ["extract_fields"]}],
     "dependentRequired": {"config_version": ["extract_fields"]},
     "properties": {

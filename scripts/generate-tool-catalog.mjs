@@ -60,7 +60,7 @@ async function readTools(region, language) {
 }
 const commonNames = new Set([
   "get_adp_guide", "upload_file", "parse_document", "extract_document", "classify_document",
-  "create_extraction_app", "update_extraction_app", "delete_extraction_app", "list_apps",
+  "create_app", "update_app", "delete_app", "list_apps",
   "get_app", "get_task", "cancel_task", "get_credits", "submit_user_feedback"
 ]);
 const regionalOnly = { cn: ["verify_invoice"], global: [] };
@@ -117,7 +117,7 @@ for (const { doc, regions } of catalogs) {
 function requiredToolInput(tool, doc) {
   // Both modes expose the same file fields; the private schema also accepts the legacy nested file.
   if (tool.name === "extract_document") {
-    return [doc.alternatives(["file_url", "file_base64"].map(code)), doc.alternatives(["app_id", "fields"].map(code))].join(" + ");
+    return [code("file_url"), doc.alternatives(["app_id", "fields"].map(code))].join(" + ");
   }
   return requiredInput(validationInputSchema(tool), doc);
 }
