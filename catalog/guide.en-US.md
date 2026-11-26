@@ -130,7 +130,7 @@ To check the credits consumed by a single processing request, read `usage.credit
 
 ### How do I add credits when I run out?
 
-When your free credits run out, you can wait until the first day of the following month for a new allowance. To continue processing documents sooner, add credits through the option available for your account's region or deployment.
+When your free credits run out, you can wait until the first day of the following month for a new allowance. To continue processing documents sooner, add credits through the option available for your account's region.
 
 {credit_action}
 

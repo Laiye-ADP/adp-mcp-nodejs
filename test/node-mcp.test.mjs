@@ -10,6 +10,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { AdpClient } from "../dist/adp-client.js";
+import { businessGuide } from "../dist/business-guides.js";
 import { callTool, getTools } from "../dist/tools.js";
 
 const entry = fileURLToPath(new URL("../dist/index.js", import.meta.url));
@@ -427,7 +428,7 @@ test("credit guidance follows the configured workspace even when the guide langu
     [{ ADP_API_BASE_URL: cnOrigin, ADP_ACCEPT_LANGUAGE: "en" }, cnOrigin, /Account Management/, [globalOrigin]],
     [{ ADP_REGION: "global", ADP_ACCEPT_LANGUAGE: "zh" }, globalOrigin, /联系来也/, [cnOrigin]],
     [{ ADP_REGION: "cn", ADP_API_BASE_URL: "https://private.example", ADP_ACCEPT_LANGUAGE: "zh" },
-      "本部署", /管理员/, [cnOrigin, globalOrigin]],
+      "账号所属区域", /余额/, [cnOrigin, globalOrigin]],
     [{ ADP_ACCEPT_LANGUAGE: "en" }, "region", /balance/i, [cnOrigin, globalOrigin]],
     [{ ADP_REGION: "invalid" }, "区域", /余额/, [cnOrigin, globalOrigin]]
   ];
@@ -437,7 +438,17 @@ test("credit guidance follows the configured workspace even when the guide langu
     assert.equal(result.status, "succeeded");
     assert.ok(result.markdown.includes(destination));
     assert.match(result.markdown, action);
+    assert.doesNotMatch(result.markdown, /私有部署|本部署|private deployment|self-hosted|your deployment|administrator/i);
     for (const origin of excluded) assert.ok(!result.markdown.includes(origin));
+  }
+  for (const language of ["zh-CN", "en-US"]) {
+    for (const workspace of ["cn", "global", "private", "unknown"]) {
+      for (const allowChinaInvoice of [true, false]) {
+        const markdown = businessGuide(language, workspace, allowChinaInvoice);
+        assert.doesNotMatch(markdown, /私有部署|本部署|private deployment|self-hosted|your deployment|administrator/i);
+        assert.doesNotMatch(markdown, /\{credit_action\}|<!-- china-invoice -->/);
+      }
+    }
   }
 });
 
