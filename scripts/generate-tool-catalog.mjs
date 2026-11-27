@@ -16,13 +16,13 @@ const documents = [
     filename: "README.md", language: "en-US", headers: "| Tool | Required inputs | Purpose |", none: "None",
     alternatives: inputs => `(${inputs.join(" or ")})`,
     introduction: (version, count) =>
-      `Version ${code(version)} exposes **${count} tools** in both regions. See the tool definitions on your connection for region-specific tools and parameters.`
+      `The table below lists **${count} tools** available in both regions. See the tool definitions on your connection for region-specific tools and parameters.`
   },
   {
     filename: "README_CN.md", language: "zh-CN", headers: "| 工具 | 必填参数 | 用途 |", none: "无",
     alternatives: inputs => `（${inputs.join(" 或 ")}）`,
     introduction: (version, count) =>
-      `版本 ${code(version)}，下表列出两区通用的 **${count}** 个工具。区域专属工具和参数以当前连接的工具定义为准。`
+      `下表列出两区通用的 **${count}** 个工具。区域专属工具和参数以当前连接的工具定义为准。`
   }
 ];
 

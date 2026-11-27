@@ -8,31 +8,23 @@ Process local or online documents from an MCP client that supports stdio. Use AD
 
 You need Node.js 20 or later and an ADP API key for your account’s region. [Get a key for China](https://adp.laiye.com?from=getkey&utm_source=github) · [Get a key for Global](https://adp-global.laiye.com?from=getkey&utm_source=github)
 
-From the v2 source directory, build the local entry point:
-
-```sh
-npm ci
-npm run build
-```
-
-Add the following configuration to your stdio-compatible MCP client. Replace the path in `args` with the absolute path to the generated `dist/index.js`, enter your API key, and connect. Call `tools/list` to see the tools available on that connection.
+Add the following configuration to your stdio-compatible MCP client, enter your API key, and connect. The client starts version 2.0.0 through `npx`. Call `tools/list` to see the tools available on that connection.
 
 ```json
 {
   "mcpServers": {
     "laiye-adp": {
-      "command": "node",
-      "args": ["/absolute/path/to/laiye-adp-mcp-nodejs-v2/dist/index.js"],
+      "command": "npx",
+      "args": ["-y", "@laiye-adp/mcp@2.0.0"],
       "env": {
-        "ADP_API_KEY": "<your-existing-api-key>",
+        "ADP_API_KEY": "<YOUR-ADP-API-Key>",
+        "API_SOURCE": "npm-mcp",
         "ADP_ACCEPT_LANGUAGE": "en"
       }
     }
   }
 }
 ```
-
-If you already have a v2 `.tgz` package, you can skip the build. Set `command` to `npx` and `args` to `["-y", "--package=/absolute/path/to/package.tgz", "laiye-adp-mcp"]`, substituting the path to your package.
 
 If you saved credentials with `adp config set` on the same machine under the same OS account, omit `ADP_API_KEY` to reuse the CLI’s key, service URL, and tenant. Otherwise, store your key in your MCP client’s credential manager.
 
@@ -41,6 +33,7 @@ If you saved credentials with `adp config set` on the same machine under the sam
 | Environment variable | Purpose |
 | --- | --- |
 | `ADP_API_KEY` | ADP API key. If omitted, the server looks for ADP CLI credentials saved under the same OS account. |
+| `API_SOURCE` | Optional source marker sent as the `X-Api-Source` request header. Defaults to `adp-node-mcp` when omitted. |
 | `ADP_REGION` | Set to `cn` or `global` to select an official cloud region. The server can detect the region when given only a key. |
 | `ADP_API_BASE_URL` | Service root URL for a private deployment. |
 | `ADP_TENANT_NAME` | Tenant name. For a private deployment, configure it together with the service URL. |
@@ -103,7 +96,7 @@ The table shows the descriptions and required parameters from the tool definitio
 
 <!-- tool-catalog:start -->
 
-Version `2.0.0-beta.2` exposes **14 tools** in both regions. See the tool definitions on your connection for region-specific tools and parameters.
+The table below lists **14 tools** available in both regions. See the tool definitions on your connection for region-specific tools and parameters.
 
 | Tool | Required inputs | Purpose |
 | --- | --- | --- |

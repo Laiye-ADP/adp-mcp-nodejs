@@ -8,31 +8,23 @@
 
 需要 Node.js 20+ 和 ADP API Key。[获取中国区 Key](https://adp.laiye.com?from=getkey&utm_source=github) · [获取全球区 Key](https://adp-global.laiye.com?from=getkey&utm_source=github)
 
-在 v2 源码目录执行以下命令，生成 `dist/index.js`。
-
-```sh
-npm ci
-npm run build
-```
-
-把下面的配置加入支持 stdio 的 MCP 客户端，将 `args` 中的路径换成刚生成的 `dist/index.js` 的绝对路径，填入 API Key 后连接。连接后，用 `tools/list` 查看当前可用工具。
+把下面的配置加入支持 stdio 的 MCP 客户端，填入 API Key 后连接。客户端会通过 `npx` 启动 2.0.0 版本。连接后，用 `tools/list` 查看当前可用工具。
 
 ```json
 {
   "mcpServers": {
     "laiye-adp": {
-      "command": "node",
-      "args": ["/absolute/path/to/laiye-adp-mcp-nodejs-v2/dist/index.js"],
+      "command": "npx",
+      "args": ["-y", "@laiye-adp/mcp@2.0.0"],
       "env": {
-        "ADP_API_KEY": "<your-existing-api-key>",
+        "ADP_API_KEY": "<YOUR-ADP-API-Key>",
+        "API_SOURCE": "npm-mcp",
         "ADP_ACCEPT_LANGUAGE": "zh"
       }
     }
   }
 }
 ```
-
-如果手头已有 v2 的 `.tgz` 安装包，可跳过构建。在上例中将 `command` 改为 `npx`，将 `args` 改为 `["-y", "--package=/absolute/path/to/package.tgz", "laiye-adp-mcp"]`，并替换为安装包的实际路径。
 
 如果已在同一台机器、同一系统账号下用 `adp config set` 保存凭据，从示例中移除 `ADP_API_KEY`，即可复用 CLI 保存的 Key、地址和租户。使用客户端的凭据管理功能保存实际 Key。
 
@@ -41,6 +33,7 @@ npm run build
 | 环境变量 | 用途 |
 | --- | --- |
 | `ADP_API_KEY` | ADP API Key。省略时尝试复用同一系统账号的 ADP CLI 凭据。 |
+| `API_SOURCE` | 可选的调用来源标识，作为 `X-Api-Source` 请求头发送。未设置时默认 `adp-node-mcp`。 |
 | `ADP_REGION` | `cn` 或 `global`，选择官方公有云区域。只提供 Key 时可自动识别区域。 |
 | `ADP_API_BASE_URL` | 指定服务根地址，适用于专有部署。 |
 | `ADP_TENANT_NAME` | 指定实际租户。专有部署请与服务地址一起配置。 |
@@ -103,7 +96,7 @@ npm run build
 
 <!-- tool-catalog:start -->
 
-版本 `2.0.0-beta.2`，下表列出两区通用的 **14** 个工具。区域专属工具和参数以当前连接的工具定义为准。
+下表列出两区通用的 **14** 个工具。区域专属工具和参数以当前连接的工具定义为准。
 
 | 工具 | 必填参数 | 用途 |
 | --- | --- | --- |
