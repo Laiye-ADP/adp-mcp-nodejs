@@ -1,4 +1,5 @@
 import { readFile, writeFile } from "node:fs/promises";
+import { deepStrictEqual } from "node:assert/strict";
 import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
@@ -13,16 +14,22 @@ const beginMarker = "<!-- tool-catalog:start -->";
 const endMarker = "<!-- tool-catalog:end -->";
 const documents = [
   {
-    filename: "README.md", language: "en-US", headers: "| Tool | Required inputs | Purpose |", none: "None",
+    filename: "README.md", language: "en-US", headers: "| Tool | Region | Required inputs | Purpose |", none: "None",
+    sharedRegion: "China & Global", chinaRegion: "China only", globalRegion: "Global only",
+    invoiceRequirements: " + fields required for the invoice type (fpAmount when type_key is omitted)",
+    regionalParameters: parameters => `Regional parameter difference: ${parameters} is available only in China.`,
     alternatives: inputs => `(${inputs.join(" or ")})`,
-    introduction: (version, count) =>
-      `The table below lists **${count} tools** available in both regions. See the tool definitions on your connection for region-specific tools and parameters.`
+    introduction: (regions, count) =>
+      `The table below lists all **${count} tools**: **${regions.cn.tools.length}** are available in China and **${regions.global.tools.length}** in Global. The Region column identifies availability; ${code("verify_invoice")} is available only in China. See ${code("tools/list")} on your connection for complete parameter definitions.`
   },
   {
-    filename: "README_CN.md", language: "zh-CN", headers: "| 工具 | 必填参数 | 用途 |", none: "无",
+    filename: "README_CN.md", language: "zh-CN", headers: "| 工具 | 适用区域 | 必填参数 | 用途 |", none: "无",
+    sharedRegion: "国内版、国际版", chinaRegion: "仅国内版", globalRegion: "仅国际版",
+    invoiceRequirements: " + 按票种补充必需字段（省略 type_key 时必填 fpAmount）",
+    regionalParameters: parameters => `区域参数差异：${parameters} 仅国内版提供。`,
     alternatives: inputs => `（${inputs.join(" 或 ")}）`,
-    introduction: (version, count) =>
-      `下表列出两区通用的 **${count}** 个工具。区域专属工具和参数以当前连接的工具定义为准。`
+    introduction: (regions, count) =>
+      `下表完整列出 **${count}** 个工具：国内版提供 **${regions.cn.tools.length}** 个，国际版提供其中 **${regions.global.tools.length}** 个。适用区域见表中标注，${code("verify_invoice")} 仅国内版可用。完整参数定义以当前连接的 ${code("tools/list")} 为准。`
   }
 ];
 
@@ -64,23 +71,36 @@ const commonNames = new Set([
   "get_app", "get_task", "cancel_task", "get_credits", "submit_user_feedback"
 ]);
 const regionalOnly = { cn: ["verify_invoice"], global: [] };
+const chinaOnlyInputs = { extract_document: ["enable_invoice_verify"] };
 const catalogs = await Promise.all(documents.map(async doc => {
   const [cn, global] = await Promise.all([readTools("cn", doc.language), readTools("global", doc.language)]);
   return { doc, regions: { cn, global } };
 }));
 const version = catalogs[0].regions.global.version;
-const referenceInputs = new Map(catalogs[0].regions.global.tools.map(tool => [tool.name, requiredToolInput(tool, documents[0])]));
+const referenceInputs = new Map(catalogs[0].regions.cn.tools.map(tool => [tool.name, requiredToolInput(tool, documents[0])]));
 for (const { doc, regions } of catalogs) {
   for (const [region, result] of Object.entries(regions)) {
     const expected = new Set([...commonNames, ...regionalOnly[region]]);
     if (result.version !== version || result.tools.length !== expected.size || result.tools.some(({ name }) => !expected.has(name))) {
       throw new Error(`Unexpected ${doc.language} ${region} catalog. Expected version ${version} and ${expected.size} tools.`);
     }
-    for (const tool of result.tools.filter(({ name }) => commonNames.has(name))) {
+    for (const tool of result.tools) {
       if (requiredToolInput(tool, documents[0]) !== referenceInputs.get(tool.name)) {
         throw new Error(`Required inputs differ for ${doc.language} ${region} ${tool.name}.`);
       }
     }
+  }
+  for (const name of commonNames) {
+    const chinaTool = structuredClone(regions.cn.tools.find(tool => tool.name === name));
+    const globalTool = regions.global.tools.find(tool => tool.name === name);
+    for (const parameter of chinaOnlyInputs[name] ?? []) {
+      if (!Object.hasOwn(chinaTool.inputSchema.properties, parameter)
+          || Object.hasOwn(globalTool.inputSchema.properties, parameter)) {
+        throw new Error(`Unexpected regional availability for ${name}.${parameter}.`);
+      }
+      delete chinaTool.inputSchema.properties[parameter];
+    }
+    deepStrictEqual(chinaTool, globalTool, `Unexpected regional tool difference for ${doc.language} ${name}.`);
   }
 }
 
@@ -93,16 +113,22 @@ for (const { doc, regions } of catalogs) {
   if (begin < 0 || end < begin || readme.lastIndexOf(beginMarker) !== begin || readme.lastIndexOf(endMarker) !== end) {
     throw new Error(`${doc.filename} must contain one ordered pair of tool catalog markers.`);
   }
-  const tools = regions.global.tools.filter(({ name }) => commonNames.has(name));
-  const rows = tools.map(tool =>
-    `| ${code(tool.name)} | ${requiredToolInput(tool, doc)} | ${markdownCell(tool.description ?? "")} |`);
+  const tools = [...new Map([...regions.cn.tools, ...regions.global.tools].map(tool => [tool.name, tool])).values()];
+  const chinaNames = new Set(regions.cn.tools.map(tool => tool.name));
+  const globalNames = new Set(regions.global.tools.map(tool => tool.name));
+  const rows = tools.map(tool => {
+    const region = chinaNames.has(tool.name)
+      ? globalNames.has(tool.name) ? doc.sharedRegion : doc.chinaRegion
+      : doc.globalRegion;
+    return `| ${code(tool.name)} | ${region} | ${requiredToolInput(tool, doc)} | ${markdownCell(tool.description ?? "")} |`;
+  });
+  const regionalParameters = Object.entries(chinaOnlyInputs)
+    .flatMap(([name, parameters]) => parameters.map(parameter => code(`${name}.${parameter}`))).join(", ");
   const catalog = [
-    beginMarker, "", doc.introduction(version, tools.length), "", doc.headers, "| --- | --- | --- |", ...rows, "", endMarker
+    beginMarker, "", doc.introduction(regions, tools.length), "", doc.headers, "| --- | --- | --- | --- |", ...rows,
+    "", doc.regionalParameters(regionalParameters), "", endMarker
   ].join("\n");
   const updated = readme.slice(0, begin) + catalog + readme.slice(end + endMarker.length);
-  if (/verify_invoice|enable_invoice_verify|发票验真|invoice verification/i.test(updated)) {
-    throw new Error(`${doc.filename} must describe common tools only; regional capabilities stay in tool discovery.`);
-  }
   if (updated !== readme && args.includes("--check")) {
     console.error(`${doc.filename} tool catalog is stale. Build and run npm run catalog:generate.`);
     process.exitCode = 1;
@@ -110,7 +136,7 @@ for (const { doc, regions } of catalogs) {
     if (updated !== readme) {
       await writeFile(readmePath, original.includes("\r\n") ? updated.replaceAll("\n", "\r\n") : updated);
     }
-    console.log(`${doc.filename} matches ${tools.length} common tools from ${version} (CN=${regions.cn.tools.length}, Global=${regions.global.tools.length}).`);
+    console.log(`${doc.filename} matches all ${tools.length} tools from ${version} (CN=${regions.cn.tools.length}, Global=${regions.global.tools.length}).`);
   }
 }
 
@@ -119,7 +145,8 @@ function requiredToolInput(tool, doc) {
   if (tool.name === "extract_document") {
     return [code("file_url"), doc.alternatives(["app_id", "fields"].map(code))].join(" + ");
   }
-  return requiredInput(validationInputSchema(tool), doc);
+  const required = requiredInput(validationInputSchema(tool), doc);
+  return tool.name === "verify_invoice" ? required + doc.invoiceRequirements : required;
 }
 
 function requiredInput(schema, doc) {
