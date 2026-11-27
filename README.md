@@ -89,10 +89,10 @@ Use `get_credits` to check the account balance. For an individual task, read `us
 
 ## Tool catalog
 
-The table shows the descriptions and required parameters from the tool definitions. You can also call `tools/list` on your connection.
+The table is generated from the tool definitions and lists descriptions and required-input summaries for tools shared by both regions. Use `tools/list` after connecting for the complete tool definitions and all parameters.
 
 <details>
-<summary>View the full tool catalog</summary>
+<summary>View tools shared by both regions</summary>
 
 <!-- tool-catalog:start -->
 

@@ -89,10 +89,10 @@
 
 ## 工具目录
 
-完整工具说明及必填参数由当前工具定义生成，也可在连接后通过 `tools/list` 查看。
+下表由工具定义生成，列出两区通用工具的描述和必填参数摘要。完整工具定义及所有参数可在连接后通过 `tools/list` 查看。
 
 <details>
-<summary>查看完整工具目录</summary>
+<summary>查看两区通用工具目录</summary>
 
 <!-- tool-catalog:start -->
 
